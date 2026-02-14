@@ -186,22 +186,30 @@ def predict_single(model, config, scraper, course, rno, date_str):
         input_df = pd.DataFrame([input_data])[config["features"]]
         prob = model.predict(input_df)[0]
         
-        # スナイパー(軸)の選定: 2〜6号艇の中で展示タイムが最も速い艇
+        # スナイパー(軸)の選定: 2〜6号艇の中で展示タイムが速い順にソート
         ex_times_26 = {i: race_data[f"ex_time_{i}"] for i in range(2, 7)}
-        sniper_boat = min(ex_times_26, key=ex_times_26.get)
+        # タイムが速い順（昇順）に並び替えて、艇番号だけのリストを作る
+        sorted_boats = sorted(ex_times_26.items(), key=lambda x: x[1])
+        top3_list = [x[0] for x in sorted_boats[:3]] # 上位3つの艇番号を取得
         
+        sniper_boat = top3_list[0] # 展示1位をメインスナイパーに
+
         # 根拠の整理
         reason = []
         if is_debuff_1: reason.append("地力デバフ(B級)")
         if race_data["ex_rank_1"] >= 5: reason.append(f"1号艇展示{int(race_data['ex_rank_1'])}位(致命的)")
         if race_data["wind_speed"] >= 5: reason.append(f"強風({race_data['wind_speed']}m)")
-        
         reason_str = " / ".join(reason) if reason else "展示・級別バランス崩壊"
 
+        # レスポンス辞書の作成
         res_dict = {
-            "場名": course, "レース": f"{rno}R", "締切": race_data['deadline'],
-            "確率": prob, # 判定用に数値で持つ
+            "場名": course, 
+            "レース": f"{rno}R", 
+            "締切": race_data['deadline'],
+            "確率": prob, 
             "スナイパー": f"{sniper_boat}号艇",
+            "top3": top3_list,          # ←【追加】通知で2位、3位を出すために必要
+            "top3_times": [sorted_boats[0][1], sorted_boats[1][1], sorted_boats[2][1]], # ←【追加】タイムも出すなら
             "1級別": race_data["rank_1"],
             "根拠": reason_str,
             "買い目": f"{sniper_boat}-全-全 (万舟狙い)"
@@ -272,28 +280,56 @@ def run_github_patrol():
             # 対象レースがない場合はスルー（ログ節約のため表示しないか、ドットだけ出す）
             print(f"{course}: No target races now.")
 
-    # 3. 通知
-    if hits:
-        hits.sort(key=lambda x: x['締切'])
-        
-        content = "🎯 イン飛びボーダー超え発動\n"
-        content += "━━━━━━━━━━━━━━━━━━━━\n"
-        for r in hits:
-            # ランク判定
-            rank = "🔥【A:勝負】"
-            if r['確率'] >= 0.65: rank = "👑【SSS:鉄板飛び】"
-            elif r['確率'] >= 0.60: rank = "💎【S:高期待値】"
-
-            content += f"{rank}\n"
-            content += f"📍 {r['場名']} {r['レース']} (締切 {r['締切']})\n"
-            content += f"📈 確率: `{r['確率']:.3f}` (Border: 0.570)\n"
-            content += f"🕵️ イン不安要素: {r['根拠']}\n"
-            content += f"🔫 狙い撃ち軸: `{r['スナイパー']}` (展示最速)\n"
-            content += f"🎫 推奨: `{r['買い目']}`\n"
+    # 3. 通知セクション
+if hits:
+    hits.sort(key=lambda x: x['締切'])
+    border = config.get("best_threshold", 0.570)
+    
+    for r in hits:
+        try:
+            # 変数の安全な取り出し（辞書にキーがない場合の備え）
+            top3 = r.get('top3', [0, 0, 0])
+            times = r.get('top3_times', [0.0, 0.0, 0.0])
+            
+            b1, b2, b3 = top3[0], top3[1], top3[2]
+            t1, t2, t3 = times[0], times[1], times[2]
+            
+            prob = r.get('確率', 0.0)
+            rank_label = "SSS" if prob >= 0.65 else "S" if prob >= 0.60 else "A"
+            
+            # --- メッセージ組み立て ---
+            content = f"🚀 **スナイパーモード：多段構え戦略**\n"
+            content += f"【{rank_label}ランク】(イン飛び確率: `{prob:.3f}` / Border: {border:.3f})\n"
+            content += f"📍 **{r['場名']} {r['レース']}** (締切 {r['締切']})\n"
+            content += f"━━━━━━━━━━━━━━━━━━━━\n"
+            
+            content += f"🕵️ イン不安要素: {r.get('根拠', '展示・級別バランス崩壊')}\n"
+            content += f"🥇 **展示1位(軸): {b1}号艇** ({t1})\n"
+            content += f"🥈 **展示2位(軸): {b2}号艇** ({t2})\n"
+            content += f"🥉 **展示3位(軸): {b3}号艇** ({t3})\n"
+            
+            content += f"\n💰 **資金配分プラン (予算上限: 6,000円)**\n"
+            content += f"①【スナイパー：20点】(2,000円)\n"
+            content += f"🎯 `{b1} — 全 — 全` (100円) → **20倍以上で勝ち**\n\n"
+            
+            content += f"②【ダブル軸：40点】(4,000円)\n"
+            content += f"🎯 `{b1},{b2} — 全 — 全` (100円) → **40倍以上で勝ち**\n\n"
+            
+            content += f"③【フルカバー：60点】(6,000円)\n"
+            content += f"🎯 `{b1},{b2},{b3} — 全 — 全` (100円) → **60倍以上で勝ち**\n"
+            content += f"⚠️ *低配当時はトリガミ注意！*\n\n"
+            
+            content += f"🔥 **【厚盛り・絞り：8点】(5,600円)**\n"
+            content += f"🎯 `{b1},{b2} — {b1},{b2} — 全` (700円)\n"
+            content += f"💡 *1点あたりを厚く張るならこれ！*\n"
             content += "━━━━━━━━━━━━━━━━━━━━\n"
-        
-        if DISCORD_WEBHOOK_URL:
-            requests.post(DISCORD_WEBHOOK_URL, json={"content": content})
+            
+            if DISCORD_WEBHOOK_URL:
+                requests.post(DISCORD_WEBHOOK_URL, json={"content": content})
+                
+        except Exception as e:
+            print(f"通知生成エラー (スキップします): {e}")
+            continue
 
 if __name__ == "__main__":
     run_github_patrol()
