@@ -5,7 +5,6 @@ import pickle
 import re
 import requests
 import time
-import concurrent.futures
 from bs4 import BeautifulSoup
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -16,10 +15,12 @@ from datetime import datetime, timedelta, timezone
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 JST = timezone(timedelta(hours=9), 'JST')
 
+MODEL_DIR = "boatrace/output_v4"
+
 # ==========================================
-# 1. スクレイパー
+# 1. スクレイパー (v5: 全艇の級別・勝率対応)
 # ==========================================
-class BoatRaceScraperV4:
+class BoatRaceScraperV5:
     BASE_URL = "https://www.boatrace.jp/owpc/pc/race/beforeinfo"
     LIST_URL = "https://www.boatrace.jp/owpc/pc/race/racelist"
     INDEX_URL = "https://www.boatrace.jp/owpc/pc/race/index"
@@ -42,7 +43,7 @@ class BoatRaceScraperV4:
                 res.raise_for_status()
                 return BeautifulSoup(res.content, "html.parser")
             except:
-                time.sleep(1) # エラー時は少し待つ
+                time.sleep(1)
                 continue
         return None
 
@@ -57,28 +58,17 @@ class BoatRaceScraperV4:
                 active_courses.append(inv_map[m.group(1)])
         return sorted(list(set(active_courses)))
 
-    # 時刻表だけを先にチェックする軽量メソッド
     def get_target_races_for_course(self, course, date_str, now_dt):
         jcd = self.COURSE_MAP[course]
         url = f"{self.LIST_URL}?jcd={jcd}&hd={date_str}"
         soup = self._get_soup(url)
         targets = []
-        
         if not soup: return []
-
-        # ページ内の全レースの締切時刻を探す
-        # テーブル構造から時刻を抽出
-        # 通常、racelistページの各Rのヘッダー付近に時刻がある
-        # 簡易的にテキスト全体から "1R ... 10:52" のようなパターンを探すのは困難なため
-        # HTML構造（tbody）から順番に時間を抜く
         
         bodies = soup.select("tbody") 
-        # 出走表は通常12個のtbodyで構成される (Rごとの塊)
-        
         current_r = 1
         for b in bodies:
             text = b.get_text().replace("\n", " ")
-            # "締切予定 10:30" を探す
             m = re.search(r"締切予定.*?(\d{1,2}:\d{2})", text)
             if m:
                 time_str = m.group(1).zfill(5)
@@ -87,16 +77,11 @@ class BoatRaceScraperV4:
                     race_dt = datetime.strptime(race_dt_str, "%Y%m%d %H:%M").replace(tzinfo=JST)
                     diff = race_dt - now_dt
                     minutes = diff.total_seconds() / 60
-                    
-                    # 【重要】 ここでフィルタリング！
-                    # 締切まで 10分〜35分 のレースだけをリストに追加
-                    if 10 <= minutes <= 35:
+                    if 10 <= minutes <= 40: # 締切10〜40分前を対象
                         targets.append(current_r)
-                except:
-                    pass
+                except: pass
             current_r += 1
             if current_r > 12: break
-            
         return targets
 
     def fetch_race_data(self, course, rno, date_str):
@@ -106,26 +91,31 @@ class BoatRaceScraperV4:
             soup_list = self._get_soup(f"{self.LIST_URL}?rno={rno}&jcd={jcd}&hd={date_str}")
             if not soup_list: return None
             
+            # 締切時刻
             deadline_str = "00:00"
-            text_full = soup_list.get_text()
-            match_time = re.search(r"締切予定.*?(\d{1,2}:\d{2})", text_full)
-            if match_time: deadline_str = match_time.group(1).zfill(5)
+            m_time = re.search(r"締切予定.*?(\d{1,2}:\d{2})", soup_list.get_text())
+            if m_time: deadline_str = m_time.group(1).zfill(5)
             
+            # 各艇の級別と勝率
             bodies = soup_list.select("tbody.is-fs12")
-            if not bodies: bodies = soup_list.select("tbody")
+            if len(bodies) < 6: bodies = soup_list.select("tbody") # フォールバック
             
-            row1 = None
-            for b_idx, b in enumerate(bodies):
-                if "１" in b.text[:10]: row1 = b; break
-            if not row1: return None
-
-            rank_1, win_rate_1 = "B2", 0.0
-            rank_match = re.search(r"/ ([AB][12])", row1.text)
-            if rank_match: rank_1 = rank_match.group(1)
-            
-            td_texts = [td.text.strip().replace("\n", " ") for td in row1.find_all("td")]
-            all_rates = re.findall(r"(\d\.\d{2})", " ".join(td_texts))
-            if all_rates: win_rate_1 = float(all_rates[0])
+            # 艇番ごとの情報を抽出
+            boat_info = {}
+            for i in range(1, 7):
+                target_body = None
+                for b in bodies:
+                    if str(i) in b.text[:10]: # 艇番がテキストの先頭付近にあるか
+                        target_body = b
+                        break
+                
+                rank, win_rate = "B2", 0.0
+                if target_body:
+                    r_m = re.search(r"/ ([AB][12])", target_body.text)
+                    if r_m: rank = r_m.group(1)
+                    rates = re.findall(r"(\d\.\d{2})", target_body.get_text())
+                    if rates: win_rate = float(rates[0])
+                boat_info[i] = {"rank": rank, "win_rate": win_rate}
 
             # 2. 直前情報
             soup_info = self._get_soup(f"{self.BASE_URL}?rno={rno}&jcd={jcd}&hd={date_str}")
@@ -137,199 +127,141 @@ class BoatRaceScraperV4:
                 txt = weather.text
                 w_m = re.search(r"風速.*?(\d+)m", txt)
                 h_m = re.search(r"波高.*?(\d+)cm", txt)
-                if w_m: wind_speed = int(w_m.group(1))
-                if h_m: wave = int(h_m.group(1))
+                if w_m: wind_speed, wave = int(w_m.group(1)), int(h_m.group(1))
 
             table = soup_info.select_one(".is-w748")
             if not table: return None
             rows = table.select("tbody")
-            ex_times, st_list = [], []
-            for i in range(6):
-                tds = rows[i].select("td")
-                if len(tds) < 5 or not tds[4].text.strip(): return None
-                ex_times.append(float(tds[4].text.strip()))
-                st_text = tds[2].select_one(".is-fs11").text.strip() if tds[2].select_one(".is-fs11") else "0.00"
-                st_list.append(float(re.search(r"(\.\d+)", st_text).group(1)) if re.search(r"(\.\d+)", st_text) else 0.0)
-
-            ex_rank = pd.Series(ex_times).rank(method="min").tolist()
             
-            data = {
-                "wind_speed": wind_speed, "wave": wave, 
-                "ex_rank_1": ex_rank[0], "rank_1": rank_1, "win_rate_1": win_rate_1,
-                "deadline": deadline_str 
-            }
-            for i in range(6):
-                data[f"st_{i+1}"] = st_list[i]
-                data[f"ex_time_{i+1}"] = ex_times[i]
+            data = {"wind_speed": wind_speed, "wave": wave, "deadline": deadline_str}
+            for i in range(1, 7):
+                tds = rows[i-1].select("td")
+                if len(tds) < 5: return None
+                ex_val = tds[4].text.strip()
+                data[f"ex_time_{i}"] = float(ex_val) if ex_val else 6.80
+                st_text = tds[2].select_one(".is-fs11").text.strip() if tds[2].select_one(".is-fs11") else "0.00"
+                data[f"st_{i}"] = float("0"+re.search(r"(\.\d+)", st_text).group(1)) if re.search(r"(\.\d+)", st_text) else 0.15
+                data[f"rank_{i}"] = boat_info[i]["rank"]
+                data[f"win_rate_{i}"] = boat_info[i]["win_rate"]
+
             return data
         except: return None
 
 # ==========================================
-# 2. 予測ロジック (スナイパーモード)
+# 2. 予測ロジック
 # ==========================================
 def predict_single(model, config, scraper, course, rno, date_str):
     try:
-        race_data = scraper.fetch_race_data(course, rno, date_str)
-        if not race_data: return None, -1
+        data = scraper.fetch_race_data(course, rno, date_str)
+        if not data: return None, -1
         
-        # モデル入力用データの作成
+        # 特徴量エンジニアリング (v4同等)
+        ex_cols = [f"ex_time_{i}" for i in range(1, 7)]
+        ex_vals = [data[c] for c in ex_cols]
+        ex_mean = np.mean(ex_vals)
         rank_map = {"A1": 4, "A2": 3, "B1": 2, "B2": 1}
-        rank_val_1 = rank_map.get(race_data["rank_1"], 2)
-        # 1号艇が低級別かつ展示が悪い(4位以下)場合にデバフ判定
-        is_debuff_1 = 1 if (rank_val_1 <= 2 and race_data["ex_rank_1"] >= 4) else 0
         
-        input_data = race_data.copy()
-        input_data["rank_val_1"] = rank_val_1
-        input_data["is_debuff_1"] = is_debuff_1
+        input_dict = {"wind_speed": data["wind_speed"], "wave": data["wave"]}
         
-        # 予測実行 (イン飛び確率を算出)
-        input_df = pd.DataFrame([input_data])[config["features"]]
-        prob = model.predict(input_df)[0]
+        # 各艇の特徴量
+        ex_ranks = pd.Series(ex_vals).rank(method="min").tolist()
+        for i in range(1, 7):
+            idx = i - 1
+            rv = rank_map.get(data[f"rank_{i}"], 2)
+            input_dict[f"rank_val_{i}"] = rv
+            input_dict[f"win_rate_{i}"] = data[f"win_rate_{i}"]
+            input_dict[f"ex_time_{i}"] = data[f"ex_time_{i}"]
+            input_dict[f"ex_diff_{i}"] = data[f"ex_time_{i}"] - ex_mean
+            input_dict[f"ex_rank_{i}"] = ex_ranks[idx]
+            input_dict[f"st_{i}"] = data[f"st_{i}"]
+            
+        # is_debuff_1 の計算
+        is_debuff_1 = 1 if (input_dict["rank_val_1"] <= 2 and input_dict["ex_rank_1"] >= 4) else 0
+        input_dict["is_debuff_1"] = is_debuff_1
         
-        # スナイパー(軸)の選定: 2〜6号艇の中で展示タイムが速い順にソート
-        ex_times_26 = {i: race_data[f"ex_time_{i}"] for i in range(2, 7)}
-        # タイムが速い順（昇順）に並び替えて、艇番号だけのリストを作る
-        sorted_boats = sorted(ex_times_26.items(), key=lambda x: x[1])
-        top3_list = [x[0] for x in sorted_boats[:3]] # 上位3つの艇番号を取得
+        # 予測
+        input_df = pd.DataFrame([input_dict])[config["features"]]
+        probs = model.predict(input_df)[0]
         
-        sniper_boat = top3_list[0] # 展示1位をメインスナイパーに
+        in_win_prob = probs[0]
+        in_jump_prob = 1 - in_win_prob
+        
+        # 他艇の分析
+        other_probs = probs[1:]
+        top_other_idx = np.argmax(other_probs)
+        top_other_boat = top_other_idx + 2
+        top_other_prob = other_probs[top_other_idx]
+        
+        # 戦略判定
+        strategy = ""
+        if in_jump_prob >= 0.55:
+            if top_other_prob >= 0.35: strategy = "FOCUS"
+            elif top_other_prob >= 0.25: strategy = "STANDARD"
+            else: strategy = "WIDE"
+        
+        if not strategy: return None, 0
 
-        # 根拠の整理
-        reason = []
-        if is_debuff_1: reason.append("地力デバフ(B級)")
-        if race_data["ex_rank_1"] >= 5: reason.append(f"1号艇展示{int(race_data['ex_rank_1'])}位(致命的)")
-        if race_data["wind_speed"] >= 5: reason.append(f"強風({race_data['wind_speed']}m)")
-        reason_str = " / ".join(reason) if reason else "展示・級別バランス崩壊"
-
-        # レスポンス辞書の作成
         res_dict = {
-            "場名": course, 
-            "レース": f"{rno}R", 
-            "締切": race_data['deadline'],
-            "確率": prob, 
-            "スナイパー": f"{sniper_boat}号艇",
-            "top3": top3_list,          # ←【追加】通知で2位、3位を出すために必要
-            "top3_times": [sorted_boats[0][1], sorted_boats[1][1], sorted_boats[2][1]], # ←【追加】タイムも出すなら
-            "1級別": race_data["rank_1"],
-            "根拠": reason_str,
-            "買い目": f"{sniper_boat}-全-全 (万舟狙い)"
+            "場名": course, "レース": f"{rno}R", "締切": data['deadline'],
+            "イン飛び率": in_jump_prob, "戦略": strategy,
+            "軸艇": f"{top_other_boat}号艇", "軸確率": top_other_prob,
+            "根拠": f"1号艇級別:{data['rank_1']} / 展示:{int(input_dict['ex_rank_1'])}位",
+            "買い目": f"{top_other_boat}-全-全" if strategy != "WIDE" else "1抜きBOX推奨"
         }
-
-        # しきい値（ボーダー 0.570）を超えているか判定
-        # configに無い場合は直接 0.570 を使用
-        border = config.get("best_threshold", 0.570)
-        if prob >= border:
-            return res_dict, 1
-        return res_dict, 0
+        return res_dict, 1
         
-    except Exception:
+    except Exception as e:
+        print(f"Error in predict_single: {e}")
         return None, -2
-        
+
 # ==========================================
-# 3. メイン実行 (超効率化・安全版)
+# 3. メイン実行
 # ==========================================
-def run_github_patrol():
-    print("👮 Smart Patrol Starting (JST)...")
+def run_live_patrol():
+    print("🚀 Starting...")
     
-    model_path = Path("boatrace_model_v3.pkl")
-    config_path = Path("model_config.pkl")
+    model_path = "final_model_v4.pkl"
+    config_path = "model_config_v4.pkl"
     
     if not model_path.exists():
-        print("Error: Model files not found.")
+        print(f"Error: Model files not found at {model_path}")
         return
 
     with open(model_path, "rb") as f: model = pickle.load(f)
     with open(config_path, "rb") as f: config = pickle.load(f)
 
-    scraper = BoatRaceScraperV4()
-    
+    scraper = BoatRaceScraperV5()
     now_jst = datetime.now(JST)
     date_str = now_jst.strftime("%Y%m%d")
-    print(f"Current Time: {now_jst.strftime('%H:%M')}")
-
-    # 1. 開催場を取得
+    
     courses = scraper.fetch_active_courses(date_str)
     if not courses:
         print("No races today.")
         return
-    print(f"Active Courses: {len(courses)} venues")
-    
+        
     hits = []
-
-    # 2. 会場ごとに「今やるべきレース」だけをリストアップ
     for course in courses:
-        time.sleep(1) # 会場ごとのアクセス間隔は1秒あける（安全策）
-        
-        # 時刻表をチェックして、対象レース番号(R)を取得
-        # ここでアクセスするのは1ページだけ！
-        target_races = scraper.get_target_races_for_course(course, date_str, now_jst)
-        
-        if target_races:
-            print(f"Checking {course}: Race {target_races}")
-            
-            for rno in target_races:
-                time.sleep(1) # レースごとのアクセス間隔
-                
-                # 対象レースだけ詳細データを取得して予測
-                res, status = predict_single(model, config, scraper, course, rno, date_str)
-                
-                if status == 1 and res:
-                    print(f"Found HIT! {course} {rno}R")
-                    hits.append(res)
-        else:
-            # 対象レースがない場合はスルー（ログ節約のため表示しないか、ドットだけ出す）
-            print(f"{course}: No target races now.")
+        targets = scraper.get_target_races_for_course(course, date_str, now_jst)
+        for rno in targets:
+            print(f"Analyzing {course} {rno}R...")
+            res, status = predict_single(model, config, scraper, course, rno, date_str)
+            if status == 1:
+                hits.append(res)
+            time.sleep(1)
 
-    # 3. 通知セクション
-if hits:
-    hits.sort(key=lambda x: x['締切'])
-    border = config.get("best_threshold", 0.570)
-    
-    for r in hits:
-        try:
-            # 変数の安全な取り出し（辞書にキーがない場合の備え）
-            top3 = r.get('top3', [0, 0, 0])
-            times = r.get('top3_times', [0.0, 0.0, 0.0])
-            
-            b1, b2, b3 = top3[0], top3[1], top3[2]
-            t1, t2, t3 = times[0], times[1], times[2]
-            
-            prob = r.get('確率', 0.0)
-            rank_label = "SSS" if prob >= 0.65 else "S" if prob >= 0.60 else "A"
-            
-            # --- メッセージ組み立て ---
-            content = f"🚀 **スナイパーモード：多段構え戦略**\n"
-            content += f"【{rank_label}ランク】(イン飛び確率: `{prob:.3f}` / Border: {border:.3f})\n"
+    if hits and DISCORD_WEBHOOK_URL:
+        for r in hits:
+            content = f"🎯 ** 投資チャンス到来！**\n"
             content += f"📍 **{r['場名']} {r['レース']}** (締切 {r['締切']})\n"
             content += f"━━━━━━━━━━━━━━━━━━━━\n"
-            
-            content += f"🕵️ イン不安要素: {r.get('根拠', '展示・級別バランス崩壊')}\n"
-            content += f"🥇 **展示1位(軸): {b1}号艇** ({t1})\n"
-            content += f"🥈 **展示2位(軸): {b2}号艇** ({t2})\n"
-            content += f"🥉 **展示3位(軸): {b3}号艇** ({t3})\n"
-            
-            content += f"\n💰 **資金配分プラン (予算上限: 6,000円)**\n"
-            content += f"①【スナイパー：20点】(2,000円)\n"
-            content += f"🎯 `{b1} — 全 — 全` (100円) → **20倍以上で勝ち**\n\n"
-            
-            content += f"②【ダブル軸：40点】(4,000円)\n"
-            content += f"🎯 `{b1},{b2} — 全 — 全` (100円) → **40倍以上で勝ち**\n\n"
-            
-            content += f"③【フルカバー：60点】(6,000円)\n"
-            content += f"🎯 `{b1},{b2},{b3} — 全 — 全` (100円) → **60倍以上で勝ち**\n"
-            content += f"⚠️ *低配当時はトリガミ注意！*\n\n"
-            
-            content += f"🔥 **【厚盛り・絞り：8点】(5,600円)**\n"
-            content += f"🎯 `{b1},{b2} — {b1},{b2} — 全` (700円)\n"
-            content += f"💡 *1点あたりを厚く張るならこれ！*\n"
-            content += "━━━━━━━━━━━━━━━━━━━━\n"
-            
-            if DISCORD_WEBHOOK_URL:
-                requests.post(DISCORD_WEBHOOK_URL, json={"content": content})
-                
-        except Exception as e:
-            print(f"通知生成エラー (スキップします): {e}")
-            continue
+            content += f"🔥 戦略: **{r['戦略']}**\n"
+            content += f"😱 イン飛び確率: `{r['イン飛び率']:.1%}`\n"
+            content += f"🏆 注目軸艇: **{r['軸艇']}** (勝率予測: `{r['軸確率']:.1%}`)\n"
+            content += f"📝 根拠: {r['根拠']}\n"
+            content += f"💰 推奨: `{r['買い目']}`\n"
+            content += "━━━━━━━━━━━━━━━━━━━━"
+            requests.post(DISCORD_WEBHOOK_URL, json={"content": content})
+            print(f"Sent notification for {r['場名']} {r['レース']}")
 
 if __name__ == "__main__":
-    run_github_patrol()
+    run_live_patrol()
