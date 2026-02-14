@@ -1,0 +1,31 @@
+name: Boatrace Smart Patrol
+
+on:
+  schedule:
+    # 10分ごとに実行 (0分, 10分, 20分...)
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5 # 万が一止まらなくても5分で強制終了（節約）
+
+    steps:
+    - name: Check out
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+
+    - name: Run Patrol
+      env:
+        DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      run: |
+        python main.py
