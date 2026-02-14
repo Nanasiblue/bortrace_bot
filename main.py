@@ -169,31 +169,31 @@ def predict_single(model, config, scraper, course, rno, date_str):
         return None, -2
 
 # ==========================================
-# 3. メイン実行 (GitHub Actions用パトロール)
+# 3. メイン実行 (安全版パトロール)
 # ==========================================
 def run_github_patrol():
     print("👮 Smart Patrol Starting (JST)...")
-
-    # モデル読み込み (GitHubリポジトリのルートにある前提)
+    
+    # モデル読み込み
     model_path = Path("boatrace_model_v3.pkl")
     config_path = Path("model_config.pkl")
-
+    
     if not model_path.exists():
-        print("Error: Model files not found. Please upload .pkl files.")
+        print("Error: Model files not found.")
         return
 
     with open(model_path, "rb") as f: model = pickle.load(f)
     with open(config_path, "rb") as f: config = pickle.load(f)
 
     scraper = BoatRaceScraperV4()
-
-    # 現在時刻(JST)を取得
+    
+    # 現在時刻(JST)
     now_jst = datetime.now(JST)
     date_str = now_jst.strftime("%Y%m%d")
-
+    
     print(f"Current Time (JST): {now_jst.strftime('%H:%M')}")
 
-    # 開催場の取得
+    # 開催場取得
     courses = scraper.fetch_active_courses(date_str)
     if not courses:
         print("No races today.")
@@ -202,46 +202,47 @@ def run_github_patrol():
     print(f"Active Courses: {len(courses)} venues")
     hits = []
 
-    # 並列処理で全レースチェック
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        future_to_race = {
-            executor.submit(predict_single, model, config, scraper, c, r, date_str): (c, r)
-            for c in courses for r in range(1, 13)
-        }
-
-        for future in concurrent.futures.as_completed(future_to_race):
+    # === 🛡️ ここを安全仕様に変更 ===
+    # 並列処理(ThreadPool)をやめて、1つずつ順番に処理する
+    # これならサーバーに負荷をかけない
+    
+    for c in courses:
+        for r in range(1, 13):
             try:
-                res, status = future.result()
-
+                # 1秒休む 
+                time.sleep(1) 
+                
+                # 予測実行
+                res, status = predict_single(model, config, scraper, c, r, date_str)
+                
                 # 「推奨(status=1)」かつ「データ取得成功」の場合
                 if status == 1 and res:
-                    # 時間判定: 締切時刻をパースして比較
-                    # レースの締切時刻 (JST)
                     race_dt_str = f"{date_str} {res['締切']}"
                     race_dt = datetime.strptime(race_dt_str, "%Y%m%d %H:%M").replace(tzinfo=JST)
-
-                    # 残り時間を計算
+                    
                     diff = race_dt - now_jst
                     minutes_left = diff.total_seconds() / 60
-
-                    # 条件: 「締切まで10分以上、35分以下」
-                    # 直前情報が出ていて、かつ締切まで余裕があるレースのみ通知
+                    
+                    # 締切まで10分〜35分
                     if 10 <= minutes_left <= 35:
+                        print(f"Found! {c} {r}R") # ログ確認用
                         hits.append(res)
-            except:
+            except Exception as e:
+                # エラーが出ても止まらないようにする
+                # print(f"Error at {c} {r}R: {e}") 
                 pass
 
     # 通知処理
     if hits:
         print(f"🎯 Found {len(hits)} actionable races!")
         hits.sort(key=lambda x: x['締切'])
-
+        
         content = "🤖 **激アツ直前通知** (締切10〜30分前)\n"
         for r in hits:
             content += f"**{r['場名']} {r['レース']}** (締切 {r['締切']})\n"
             content += f"確率: `{r['確率']}`  買い目: `{r['買い目']}`\n"
             content += "------------------------\n"
-
+        
         if DISCORD_WEBHOOK_URL:
             requests.post(DISCORD_WEBHOOK_URL, json={"content": content})
             print("Notification sent to Discord.")
