@@ -165,38 +165,58 @@ class BoatRaceScraperV4:
         except: return None
 
 # ==========================================
-# 2. 予測ロジック
+# 2. 予測ロジック (スナイパーモード)
 # ==========================================
 def predict_single(model, config, scraper, course, rno, date_str):
     try:
         race_data = scraper.fetch_race_data(course, rno, date_str)
         if not race_data: return None, -1
         
+        # モデル入力用データの作成
         rank_map = {"A1": 4, "A2": 3, "B1": 2, "B2": 1}
         rank_val_1 = rank_map.get(race_data["rank_1"], 2)
+        # 1号艇が低級別かつ展示が悪い(4位以下)場合にデバフ判定
         is_debuff_1 = 1 if (rank_val_1 <= 2 and race_data["ex_rank_1"] >= 4) else 0
         
         input_data = race_data.copy()
         input_data["rank_val_1"] = rank_val_1
         input_data["is_debuff_1"] = is_debuff_1
         
+        # 予測実行 (イン飛び確率を算出)
         input_df = pd.DataFrame([input_data])[config["features"]]
         prob = model.predict(input_df)[0]
         
+        # スナイパー(軸)の選定: 2〜6号艇の中で展示タイムが最も速い艇
         ex_times_26 = {i: race_data[f"ex_time_{i}"] for i in range(2, 7)}
-        axis_boat = min(ex_times_26, key=ex_times_26.get)
+        sniper_boat = min(ex_times_26, key=ex_times_26.get)
         
+        # 根拠の整理
+        reason = []
+        if is_debuff_1: reason.append("地力デバフ(B級)")
+        if race_data["ex_rank_1"] >= 5: reason.append(f"1号艇展示{int(race_data['ex_rank_1'])}位(致命的)")
+        if race_data["wind_speed"] >= 5: reason.append(f"強風({race_data['wind_speed']}m)")
+        
+        reason_str = " / ".join(reason) if reason else "展示・級別バランス崩壊"
+
         res_dict = {
             "場名": course, "レース": f"{rno}R", "締切": race_data['deadline'],
-            "確率": f"{prob:.1%}", "買い目": f"{axis_boat}頭流", "rank1": race_data["rank_1"]
+            "確率": prob, # 判定用に数値で持つ
+            "スナイパー": f"{sniper_boat}号艇",
+            "1級別": race_data["rank_1"],
+            "根拠": reason_str,
+            "買い目": f"{sniper_boat}-全-全 (万舟狙い)"
         }
 
-        if prob >= config["best_threshold"]:
+        # しきい値（ボーダー 0.570）を超えているか判定
+        # configに無い場合は直接 0.570 を使用
+        border = config.get("best_threshold", 0.570)
+        if prob >= border:
             return res_dict, 1
         return res_dict, 0
+        
     except Exception:
         return None, -2
-
+        
 # ==========================================
 # 3. メイン実行 (超効率化・安全版)
 # ==========================================
@@ -254,22 +274,26 @@ def run_github_patrol():
 
     # 3. 通知
     if hits:
-        print(f"🎯 Found {len(hits)} races!")
         hits.sort(key=lambda x: x['締切'])
         
-        content = "🤖 **激アツ直前通知** (締切10〜30分前)\n"
+        content = "🎯 イン飛びボーダー超え発動\n"
+        content += "━━━━━━━━━━━━━━━━━━━━\n"
         for r in hits:
-            content += f"**{r['場名']} {r['レース']}** (締切 {r['締切']})\n"
-            content += f"確率: `{r['確率']}`  買い目: `{r['買い目']}`\n"
-            content += "------------------------\n"
+            # ランク判定
+            rank = "🔥【A:勝負】"
+            if r['確率'] >= 0.65: rank = "👑【SSS:鉄板飛び】"
+            elif r['確率'] >= 0.60: rank = "💎【S:高期待値】"
+
+            content += f"{rank}\n"
+            content += f"📍 {r['場名']} {r['レース']} (締切 {r['締切']})\n"
+            content += f"📈 確率: `{r['確率']:.3f}` (Border: 0.570)\n"
+            content += f"🕵️ イン不安要素: {r['根拠']}\n"
+            content += f"🔫 狙い撃ち軸: `{r['スナイパー']}` (展示最速)\n"
+            content += f"🎫 推奨: `{r['買い目']}`\n"
+            content += "━━━━━━━━━━━━━━━━━━━━\n"
         
         if DISCORD_WEBHOOK_URL:
             requests.post(DISCORD_WEBHOOK_URL, json={"content": content})
-            print("Notification sent.")
-        else:
-            print("Webhook URL is missing.")
-    else:
-        print("No recommendations found.")
 
 if __name__ == "__main__":
     run_github_patrol()
