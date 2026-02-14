@@ -2,14 +2,16 @@ name: Boatrace Smart Patrol
 
 on:
   schedule:
-    # 10分ごとに実行 (0分, 10分, 20分...)
-    - cron: '*/10 * * * *'
+    # 日本時間 8:30〜21:00頃 だけ動かす設定
+    # UTC記述なので「23:30〜12:00」を指定
+    # 23時台(前日)と、0時〜12時まで、15分おきに実行
+    - cron: '*/15 23,0-12 * * *'
   workflow_dispatch:
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 5 # 万が一止まらなくても5分で強制終了（節約）
+    timeout-minutes: 7
 
     steps:
     - name: Check out
@@ -19,6 +21,15 @@ jobs:
       uses: actions/setup-python@v4
       with:
         python-version: '3.9'
+
+    # キャッシュを使ってインストール時間を短縮（節約技）
+    - name: Cache pip
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
 
     - name: Install dependencies
       run: |
