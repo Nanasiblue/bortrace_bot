@@ -15,7 +15,25 @@ from datetime import datetime, timedelta, timezone
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 JST = timezone(timedelta(hours=9), 'JST')
 
-MODEL_DIR = "boatrace/output_v4"
+# モデルファイルのパス
+MODEL_PATH = Path("final_model_v4.pkl")
+CONFIG_PATH = Path("model_config_v4.pkl")
+# 通知済みレースを記録するログファイル
+LOG_FILE = Path("notified_races.log")
+
+# ==========================================
+# 重複通知防止ロジック
+# ==========================================
+def is_already_notified(race_id):
+    if not LOG_FILE.exists():
+        return False
+    with open(LOG_FILE, "r") as f:
+        notified_races = f.read().splitlines()
+    return race_id in notified_races
+
+def save_notified_race(race_id):
+    with open(LOG_FILE, "a") as f:
+        f.write(race_id + "\n")
 
 # ==========================================
 # 1. スクレイパー (v5: 全艇の級別・勝率対応)
@@ -77,7 +95,8 @@ class BoatRaceScraperV5:
                     race_dt = datetime.strptime(race_dt_str, "%Y%m%d %H:%M").replace(tzinfo=JST)
                     diff = race_dt - now_dt
                     minutes = diff.total_seconds() / 60
-                    if 10 <= minutes <= 40: # 締切10〜40分前を対象
+                    # 直前情報（展示）が確定するタイミングに合わせて調整
+                    if 10 <= minutes <= 25: 
                         targets.append(current_r)
                 except: pass
             current_r += 1
@@ -87,37 +106,30 @@ class BoatRaceScraperV5:
     def fetch_race_data(self, course, rno, date_str):
         jcd = self.COURSE_MAP[course]
         try:
-            # 1. 出走表
             soup_list = self._get_soup(f"{self.LIST_URL}?rno={rno}&jcd={jcd}&hd={date_str}")
             if not soup_list: return None
             
-            # 締切時刻
             deadline_str = "00:00"
             m_time = re.search(r"締切予定.*?(\d{1,2}:\d{2})", soup_list.get_text())
             if m_time: deadline_str = m_time.group(1).zfill(5)
             
-            # 各艇の級別と勝率
             bodies = soup_list.select("tbody.is-fs12")
-            if len(bodies) < 6: bodies = soup_list.select("tbody") # フォールバック
+            if not bodies: bodies = soup_list.select("tbody")
             
-            # 艇番ごとの情報を抽出
             boat_info = {}
+            # 艇番抽出の精度向上
             for i in range(1, 7):
-                target_body = None
-                for b in bodies:
-                    if str(i) in b.text[:10]: # 艇番がテキストの先頭付近にあるか
-                        target_body = b
-                        break
-                
                 rank, win_rate = "B2", 0.0
-                if target_body:
-                    r_m = re.search(r"/ ([AB][12])", target_body.text)
-                    if r_m: rank = r_m.group(1)
-                    rates = re.findall(r"(\d\.\d{2})", target_body.get_text())
-                    if rates: win_rate = float(rates[0])
+                for b in bodies:
+                    is_boat_row = b.select_one(f".is-ladder{i}") or str(i) in b.text[:5]
+                    if is_boat_row:
+                        r_m = re.search(r"([AB][12])", b.get_text())
+                        if r_m: rank = r_m.group(1)
+                        rates = re.findall(r"(\d\.\d{2})", b.get_text())
+                        if rates: win_rate = float(rates[0])
+                        break
                 boat_info[i] = {"rank": rank, "win_rate": win_rate}
 
-            # 2. 直前情報
             soup_info = self._get_soup(f"{self.BASE_URL}?rno={rno}&jcd={jcd}&hd={date_str}")
             if not soup_info or "データがありません" in soup_info.text: return None
 
@@ -127,7 +139,8 @@ class BoatRaceScraperV5:
                 txt = weather.text
                 w_m = re.search(r"風速.*?(\d+)m", txt)
                 h_m = re.search(r"波高.*?(\d+)cm", txt)
-                if w_m: wind_speed, wave = int(w_m.group(1)), int(h_m.group(1))
+                if w_m: wind_speed = int(w_m.group(1))
+                if h_m: wave = int(h_m.group(1))
 
             table = soup_info.select_one(".is-w748")
             if not table: return None
@@ -136,10 +149,9 @@ class BoatRaceScraperV5:
             data = {"wind_speed": wind_speed, "wave": wave, "deadline": deadline_str}
             for i in range(1, 7):
                 tds = rows[i-1].select("td")
-                if len(tds) < 5: return None
                 ex_val = tds[4].text.strip()
-                data[f"ex_time_{i}"] = float(ex_val) if ex_val else 6.80
-                st_text = tds[2].select_one(".is-fs11").text.strip() if tds[2].select_one(".is-fs11") else "0.00"
+                data[f"ex_time_{i}"] = float(ex_val) if ex_val and ex_val[0].isdigit() else 6.80
+                st_text = tds[2].select_one(".is-fs11").text.strip() if tds[2].select_one(".is-fs11") else ".15"
                 data[f"st_{i}"] = float("0"+re.search(r"(\.\d+)", st_text).group(1)) if re.search(r"(\.\d+)", st_text) else 0.15
                 data[f"rank_{i}"] = boat_info[i]["rank"]
                 data[f"win_rate_{i}"] = boat_info[i]["win_rate"]
@@ -155,16 +167,14 @@ def predict_single(model, config, scraper, course, rno, date_str):
         data = scraper.fetch_race_data(course, rno, date_str)
         if not data: return None, -1
         
-        # 特徴量エンジニアリング (v4同等)
         ex_cols = [f"ex_time_{i}" for i in range(1, 7)]
         ex_vals = [data[c] for c in ex_cols]
         ex_mean = np.mean(ex_vals)
         rank_map = {"A1": 4, "A2": 3, "B1": 2, "B2": 1}
         
         input_dict = {"wind_speed": data["wind_speed"], "wave": data["wave"]}
-        
-        # 各艇の特徴量
         ex_ranks = pd.Series(ex_vals).rank(method="min").tolist()
+        
         for i in range(1, 7):
             idx = i - 1
             rv = rank_map.get(data[f"rank_{i}"], 2)
@@ -175,24 +185,18 @@ def predict_single(model, config, scraper, course, rno, date_str):
             input_dict[f"ex_rank_{i}"] = ex_ranks[idx]
             input_dict[f"st_{i}"] = data[f"st_{i}"]
             
-        # is_debuff_1 の計算
-        is_debuff_1 = 1 if (input_dict["rank_val_1"] <= 2 and input_dict["ex_rank_1"] >= 4) else 0
-        input_dict["is_debuff_1"] = is_debuff_1
+        input_dict["is_debuff_1"] = 1 if (input_dict["rank_val_1"] <= 2 and input_dict["ex_rank_1"] >= 4) else 0
         
-        # 予測
         input_df = pd.DataFrame([input_dict])[config["features"]]
         probs = model.predict(input_df)[0]
         
-        in_win_prob = probs[0]
-        in_jump_prob = 1 - in_win_prob
-        
-        # 他艇の分析
+        in_jump_prob = 1 - probs[0]
         other_probs = probs[1:]
         top_other_idx = np.argmax(other_probs)
         top_other_boat = top_other_idx + 2
         top_other_prob = other_probs[top_other_idx]
         
-        # 戦略判定
+        # 閾値判定 (ROI 150%超え設定)
         strategy = ""
         if in_jump_prob >= 0.55:
             if top_other_prob >= 0.35: strategy = "FOCUS"
@@ -211,57 +215,56 @@ def predict_single(model, config, scraper, course, rno, date_str):
         return res_dict, 1
         
     except Exception as e:
-        print(f"Error in predict_single: {e}")
+        print(f"Error: {e}")
         return None, -2
 
 # ==========================================
-# 3. メイン実行
+# 3. メイン実行 (パトロール)
 # ==========================================
 def run_live_patrol():
-    print("🚀 Starting...")
-    
-    model_path = "final_model_v4.pkl"
-    config_path = "model_config_v4.pkl"
-    
-    if not model_path.exists():
-        print(f"Error: Model files not found at {model_path}")
+    if not MODEL_PATH.exists():
+        print(f"Error: Model file not found.")
         return
 
-    with open(model_path, "rb") as f: model = pickle.load(f)
-    with open(config_path, "rb") as f: config = pickle.load(f)
+    with open(MODEL_PATH, "rb") as f: model = pickle.load(f)
+    with open(CONFIG_PATH, "rb") as f: config = pickle.load(f)
 
     scraper = BoatRaceScraperV5()
     now_jst = datetime.now(JST)
     date_str = now_jst.strftime("%Y%m%d")
     
     courses = scraper.fetch_active_courses(date_str)
-    if not courses:
-        print("No races today.")
-        return
-        
-    hits = []
+    
     for course in courses:
         targets = scraper.get_target_races_for_course(course, date_str, now_jst)
         for rno in targets:
+            race_id = f"{date_str}_{course}_{rno}"
+            
+            # 通知済みならスキップ
+            if is_already_notified(race_id):
+                continue
+
             print(f"Analyzing {course} {rno}R...")
             res, status = predict_single(model, config, scraper, course, rno, date_str)
+            
             if status == 1:
-                hits.append(res)
+                # Discord通知処理
+                if DISCORD_WEBHOOK_URL:
+                    content = f"🎯 ** 投資チャンス到来！**\n"
+                    content += f"📍 **{res['場名']} {res['レース']}** (締切 {res['締切']})\n"
+                    content += f"━━━━━━━━━━━━━━━━━━━━\n"
+                    content += f"🔥 戦略: **{res['戦略']}**\n"
+                    content += f"😱 イン飛び率: `{res['イン飛び率']:.1%}`\n"
+                    content += f"🏆 注目軸艇: **{res['軸艇']}** (勝率予測: `{res['軸確率']:.1%}`)\n"
+                    content += f"📝 根拠: {res['根拠']}\n"
+                    content += f"💰 推奨: `{res['買い目']}`\n"
+                    content += "━━━━━━━━━━━━━━━━━━━━"
+                    requests.post(DISCORD_WEBHOOK_URL, json={"content": content})
+                    print(f"Sent notification for {race_id}")
+                
+                # 通知済みリストに保存
+                save_notified_race(race_id)
             time.sleep(1)
-
-    if hits and DISCORD_WEBHOOK_URL:
-        for r in hits:
-            content = f"🎯 ** 投資チャンス到来！**\n"
-            content += f"📍 **{r['場名']} {r['レース']}** (締切 {r['締切']})\n"
-            content += f"━━━━━━━━━━━━━━━━━━━━\n"
-            content += f"🔥 戦略: **{r['戦略']}**\n"
-            content += f"😱 イン飛び確率: `{r['イン飛び率']:.1%}`\n"
-            content += f"🏆 注目軸艇: **{r['軸艇']}** (勝率予測: `{r['軸確率']:.1%}`)\n"
-            content += f"📝 根拠: {r['根拠']}\n"
-            content += f"💰 推奨: `{r['買い目']}`\n"
-            content += "━━━━━━━━━━━━━━━━━━━━"
-            requests.post(DISCORD_WEBHOOK_URL, json={"content": content})
-            print(f"Sent notification for {r['場名']} {r['レース']}")
 
 if __name__ == "__main__":
     run_live_patrol()
