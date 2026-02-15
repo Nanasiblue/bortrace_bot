@@ -213,8 +213,6 @@ def predict_single(model, config, scraper, course, rno, date_str):
 # 3. メイン実行 (自動パトロール)
 # ==========================================
 def run_live_patrol():
-    if DISCORD_WEBHOOK_URL:
-        requests.post(DISCORD_WEBHOOK_URL, json={"content": "✅ ボットの起動を確認しました。対象レースを探索します。"})
     
     if not MODEL_PATH.exists():
         print("Error: Model file not found.")
