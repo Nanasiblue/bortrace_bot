@@ -88,96 +88,66 @@ class BoatRaceScraperV5:
                 time.sleep(wait)
         return None
 
-    def fetch_active_courses(self, date_str):
-        self.date_str = date_str
-        print(f"[{datetime.now(JST).strftime('%H:%M:%S')}] 🔍 Fetching active courses...")
-        index_url = f"{self.INDEX_URL}?hd={date_str}"
-        soup = self._get_soup(index_url, referer="https://www.boatrace.jp/")
+    def fetch_all_targets(self, date_str, now_dt):
+        """Indexページ(開催一覧)から、全会場の全レースの締切を効率的に把握する"""
+        print(f"[{datetime.now(JST).strftime('%H:%M:%S')}] 🔍 Scanning Index for targets...")
+        url = f"{self.INDEX_URL}?hd={date_str}"
+        soup = self._get_soup(url, referer="https://www.boatrace.jp/")
         if not soup: return []
         
-        self.course_links = {}
-        active_courses = []
         inv_map = {v: k for k, v in self.COURSE_MAP.items()}
-        
-        # indexページにある実際のリンク(href)を抽出して保存する
-        # racelist へのリンク（出走表）のみを抽出するようにフィルタリング
-        for link in soup.select("a[href*='jcd=']"):
-            href = link.get('href', '')
-            # 出走表ページへのリンクのみを対象とする
-            if "racelist" not in href:
-                continue
-            
-            # rnoが含まれている場合、それを除外して「会場の全レース一覧」のURLにする
-            # これをしないと、1Rだけのページを掴んでしまい、2R以降を見失う原因になる
-            href = re.sub(r"([?&])rno=\d+&?", r"\1", href).rstrip("&? ")
-                
-            m = re.search(r"jcd=(\d{2})", href)
-            if m and m.group(1) in inv_map:
-                name = inv_map[m.group(1)]
-                if href.startswith("/"):
-                    href = "https://www.boatrace.jp" + href
-                self.course_links[name] = href
-                active_courses.append(name)
-        
-        return sorted(list(set(active_courses)))
-
-    def get_target_races_for_course(self, course, date_str, now_dt):
-        url = self.course_links.get(course)
-        if not url:
-            jcd = self.COURSE_MAP.get(course, "01")
-            url = f"{self.LIST_URL}?jcd={jcd}&hd={date_str}"
-            
-        index_url = f"{self.INDEX_URL}?hd={date_str}"
-        soup = self._get_soup(url, referer=index_url)
         targets = []
-        if not soup:
-            print(f"  ❌ Failed to get race list for {course}")
-            return []
         
-        # セパレーターを入れて、タグ同士がくっつかないようにする
-        page_text = soup.get_text(separator=' ').replace("\n", " ").replace("\r", " ").strip()
-        all_deadlines = re.findall(r"締切予定.*?(\d{1,2}:\d{2})", page_text)
-        
-        if not all_deadlines:
-            title = soup.title.string if soup.title else "No Title"
-            print(f"  ⚠️ No deadline found in {course}. (Title: {title})")
-            return []
-
-        # 動作確認用: 最初に見つかったレースの時刻を出す (5-45分前なら詳細ログ、そうでなければ簡易ログ)
-        first_time = all_deadlines[0]
-        try:
-            f_dt = datetime.strptime(f"{date_str} {first_time.zfill(5)}", "%Y%m%d %H:%M").replace(tzinfo=JST)
-            f_min = (f_dt - now_dt).total_seconds() / 60
-            # 範囲外でも、解析が動いていることを示すために1件だけログを出す
-            if not (5 <= f_min <= 45):
-                print(f"  (Detected {course} 1R at {first_time}, {f_min:.1f} min from now)")
-        except: pass
-
-        for i, time_str in enumerate(all_deadlines):
-            current_r = i + 1
-            if current_r > 12: break
-            try:
-                race_dt = datetime.strptime(f"{date_str} {time_str.zfill(5)}", "%Y%m%d %H:%M").replace(tzinfo=JST)
-                minutes = (race_dt - now_dt).total_seconds() / 60
+        # 画面上の全ての出走表リンクを走査
+        race_links = soup.select("a[href*='racelist']")
+        for link in race_links:
+            href = link.get('href', '')
+            txt = link.get_text().strip()
+            
+            # HH:MM の形式が含まれているか
+            m_time = re.search(r"(\d{1,2}:\d{2})", txt)
+            if not m_time: continue
+            
+            time_str = m_time.group(1).zfill(5)
+            jcd_m = re.search(r"jcd=(\d{2})", href)
+            rno_m = re.search(r"rno=(\d{1,2})", href)
+            
+            if jcd_m and rno_m:
+                jcd = jcd_m.group(1)
+                rno = int(rno_m.group(1))
+                course = inv_map.get(jcd)
+                if not course: continue
                 
-                # ログ表示 (5-45分前なら表示)
-                if 5 <= minutes <= 45:
-                    print(f"  - {course} {current_r}R: 締切まで {minutes:.1f}分 ({time_str})")
+                try:
+                    race_dt = datetime.strptime(f"{date_str} {time_str}", "%Y%m%d %H:%M").replace(tzinfo=JST)
+                    minutes = (race_dt - now_dt).total_seconds() / 60
+                    
+                    full_url = "https://www.boatrace.jp" + href if href.startswith("/") else href
+                    
+                    # ログ表示 (5-45分前なら表示)
+                    if 5 <= minutes <= 45:
+                        print(f"  - {course} {rno}R: 締切まで {minutes:.1f}分 ({time_str})")
 
-                # 判定: 5分〜35分前
-                if 5 <= minutes <= 35: 
-                    targets.append(current_r)
-            except Exception as e:
-                print(f"  Error parsing time for {course} {current_r}R: {e}")
-        
+                    # 判定: 5分〜35分前
+                    if 5 <= minutes <= 35: 
+                        targets.append({
+                            "course": course,
+                            "rno": rno,
+                            "time": time_str,
+                            "url": full_url
+                        })
+                except: pass
+                
         return targets
 
-    def fetch_race_data(self, course, rno, date_str):
+    def fetch_race_data(self, course, rno, date_str, race_url=None):
+        """出走表(詳細)と直前情報を取得"""
         jcd = self.COURSE_MAP.get(course, "01")
-        list_url = self.course_links.get(course, f"{self.LIST_URL}?jcd={jcd}&hd={date_str}")
+        # 直接URLが指定されていない場合は構築する
+        race_list_url = race_url if race_url else f"{self.LIST_URL}?rno={rno}&jcd={jcd}&hd={date_str}"
+        
         try:
-            race_list_url = f"{self.LIST_URL}?rno={rno}&jcd={jcd}&hd={date_str}"
-            soup_list = self._get_soup(race_list_url, referer=list_url)
+            soup_list = self._get_soup(race_list_url, referer=f"{self.INDEX_URL}?hd={date_str}")
             if not soup_list: return None
             
             deadline_str = "00:00"
@@ -236,9 +206,9 @@ class BoatRaceScraperV5:
 # ==========================================
 # 2. 予測ロジック
 # ==========================================
-def predict_single(model, config, scraper, course, rno, date_str):
+def predict_single(model, config, scraper, course, rno, date_str, race_url=None):
     try:
-        data = scraper.fetch_race_data(course, rno, date_str)
+        data = scraper.fetch_race_data(course, rno, date_str, race_url=race_url)
         if not data: 
             print(f"  ⚠️ Failed to fetch detail data for {course} {rno}R")
             return None, -1
@@ -309,47 +279,44 @@ def run_live_patrol():
     now_jst = datetime.now(JST)
     date_str = now_jst.strftime("%Y%m%d")
     
-    courses = scraper.fetch_active_courses(date_str)
-    print(f"Active Courses: {courses}")
+    # 全会場のターゲットレースを一覧ページから一括取得
+    targets = scraper.fetch_all_targets(date_str, now_jst)
     
     hit_count = 0
-    for course in courses:
-        print(f"[{datetime.now(JST).strftime('%H:%M:%S')}] 🏁 Checking {course}...")
-        targets = scraper.get_target_races_for_course(course, date_str, now_jst)
+    if not targets:
+        print("  (No target races within 5-35 min window found on Index page)")
         
-        if not targets:
-            # print(f"  (No target races in {course})")
-            pass
-            
-        for rno in targets:
-            race_id = f"{date_str}_{course}_{rno}"
-            
-            # 通知済みならスキップ
-            if is_already_notified(race_id):
-                print(f"  - {course} {rno}R: Already notified, skipping.")
-                continue
+    for race in targets:
+        course = race['course']
+        rno = race['rno']
+        race_id = f"{date_str}_{course}_{rno}"
+        
+        # 通知済みならスキップ
+        if is_already_notified(race_id):
+            print(f"  - {course} {rno}R: Already notified, skipping.")
+            continue
 
-            print(f"  - {course} {rno}R: Analyzing...")
-            res, status = predict_single(model, config, scraper, course, rno, date_str)
+        print(f"  - {course} {rno}R: Analyzing... (Deadline: {race['time']})")
+        res, status = predict_single(model, config, scraper, course, rno, date_str, race_url=race['url'])
+        
+        if status == 1:
+            hit_count += 1
+            # Discord通知処理 (フォーマットを調整)
+            content = f"🎯 **投資チャンス到来！**\n📍 **{res['場名']} {res['レース']}** (締切 {res['締切']})\n"
+            content += f"━━━━━━━━━━━━━━━━━━━━\n🔥 戦略: **{res['戦略']}**\n😱 イン飛び率: `{res['イン飛び率']:.1%}`\n\n"
+            content += f"📊 **AI勝率ランキング (1抜き)**\n🥇 **{res['1位'][0]}号艇**: `{res['1位'][1]:.1%}`\n🥈 **{res['2位'][0]}号艇**: `{res['2位'][1]:.1%}`\n🥉 **{res['3位'][0]}号艇**: `{res['3位'][1]:.1%}`\n\n"
+            content += f"📝 根拠: {res['根拠']}\n💰 推奨: `{res['買い目']}`\n━━━━━━━━━━━━━━━━━━━━"
             
-            if status == 1:
-                hit_count += 1
-                # Discord通知処理 (フォーマットを調整)
-                content = f"🎯 **投資チャンス到来！**\n📍 **{res['場名']} {res['レース']}** (締切 {res['締切']})\n"
-                content += f"━━━━━━━━━━━━━━━━━━━━\n🔥 戦略: **{res['戦略']}**\n😱 イン飛び率: `{res['イン飛び率']:.1%}`\n\n"
-                content += f"📊 **AI勝率ランキング (1抜き)**\n🥇 **{res['1位'][0]}号艇**: `{res['1位'][1]:.1%}`\n🥈 **{res['2位'][0]}号艇**: `{res['2位'][1]:.1%}`\n🥉 **{res['3位'][0]}号艇**: `{res['3位'][1]:.1%}`\n\n"
-                content += f"📝 根拠: {res['根拠']}\n💰 推奨: `{res['買い目']}`\n━━━━━━━━━━━━━━━━━━━━"
-                
-                if DISCORD_WEBHOOK_URL:
-                    try:
-                        requests.post(DISCORD_WEBHOOK_URL, json={"content": content}, timeout=15)
-                        print(f"    ✅ Notification Sent for {race_id}")
-                    except Exception as e:
-                        print(f"    ❌ Discord Error: {e}")
-                
-                # 通知済みリストに保存
-                save_notified_race(race_id)
-            time.sleep(1)
+            if DISCORD_WEBHOOK_URL:
+                try:
+                    requests.post(DISCORD_WEBHOOK_URL, json={"content": content}, timeout=15)
+                    print(f"    ✅ Notification Sent for {race_id}")
+                except Exception as e:
+                    print(f"    ❌ Discord Error: {e}")
+            
+            # 通知済みリストに保存
+            save_notified_race(race_id)
+        time.sleep(1)
 
     print(f"👮 Patrol Finished: Found {hit_count} hits.")
 
