@@ -61,12 +61,12 @@ class BoatRaceScraperV5:
     def _get_soup(self, url, retries=2):
         for i in range(retries):
             try:
-                res = requests.get(url, headers=self.headers, timeout=10)
+                res = requests.get(url, headers=self.headers, timeout=25)
                 res.raise_for_status()
                 return BeautifulSoup(res.content, "html.parser")
             except Exception as e:
                 debug_log(f"URL取得失敗({i+1}/2): {url} - {e}")
-                time.sleep(1)
+                time.sleep(5)
                 continue
         return None
 
@@ -99,7 +99,7 @@ class BoatRaceScraperV5:
                     minutes = (race_dt - now_dt).total_seconds() / 60
                     # デバッグ用に全レースの時間差を出力
                     # debug_log(f"{course} {current_r}R: 締切まで {minutes:.1f}分")
-                    if 10 <= minutes <= 25: 
+                    if 10 <= minutes <= 30: 
                         targets.append(current_r)
                 except: pass
             current_r += 1
@@ -237,7 +237,7 @@ def run_live_patrol():
             
             if status == 1:
                 hit_count += 1
-                # Discord通知省略 (既存のままでOK)
+                # Discord通知省略
                 if DISCORD_WEBHOOK_URL:
                     content = f"🎯 ** 投資チャンス！ {course} {rno}R**\nイン飛び:{res['イン飛び率']:.1%} 戦略:{res['戦略']}\n推奨:`{res['1位'][0]}-全-全`"
                     requests.post(DISCORD_WEBHOOK_URL, json={"content": content})
