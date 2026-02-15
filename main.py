@@ -15,12 +15,12 @@ from datetime import datetime, timedelta, timezone
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 JST = timezone(timedelta(hours=9), 'JST')
 
-# モデルファイルのパス (GitHub Actions等での動作を想定し相対パスで定義)
+# パスの自動解決：GitHub Actions等の環境でも確実にファイルを見つける
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "final_model_v4.pkl"
 CONFIG_PATH = BASE_DIR / "model_config_v4.pkl"
 
-# 通知済みレースを記録するログファイル
+# 通知済みログファイル
 LOG_FILE = Path("notified_races.log")
 
 # ==========================================
@@ -116,10 +116,9 @@ class BoatRaceScraperV5:
         return sorted(list(set(active_courses)))
 
     def get_target_races_for_course(self, course, date_str, now_dt):
-        # 自分でURLを組み立てず、indexページから抽出したリンクをそのまま使う
         url = self.course_links.get(course)
         if not url:
-            jcd = self.COURSE_MAP[course]
+            jcd = self.COURSE_MAP.get(course, "01")
             url = f"{self.LIST_URL}?jcd={jcd}&hd={date_str}"
             
         index_url = f"{self.INDEX_URL}?hd={date_str}"
@@ -129,40 +128,50 @@ class BoatRaceScraperV5:
             print(f"  ❌ Failed to get race list for {course}")
             return []
         
-        page_text = soup.get_text().replace("\n", " ").replace("\r", " ").strip()
+        # セパレーターを入れて、タグ同士がくっつかないようにする
+        page_text = soup.get_text(separator=' ').replace("\n", " ").replace("\r", " ").strip()
         all_deadlines = re.findall(r"締切予定.*?(\d{1,2}:\d{2})", page_text)
         
         if not all_deadlines:
-            # 取得失敗時にタイトルなどを表示して原因を探る
             title = soup.title.string if soup.title else "No Title"
             print(f"  ⚠️ No deadline found in {course}. (Title: {title})")
             return []
 
+        closest_min = 999
         for i, time_str in enumerate(all_deadlines):
             current_r = i + 1
             if current_r > 12: break
             try:
                 race_dt = datetime.strptime(f"{date_str} {time_str.zfill(5)}", "%Y%m%d %H:%M").replace(tzinfo=JST)
                 minutes = (race_dt - now_dt).total_seconds() / 60
+                
+                # ログ表示 (5-45分前なら表示)
                 if 5 <= minutes <= 45:
                     print(f"  - {course} {current_r}R: 締切まで {minutes:.1f}分 ({time_str})")
+                elif abs(minutes) < abs(closest_min):
+                    closest_min = minutes
+
+                # 判定: 5分〜35分前
                 if 5 <= minutes <= 35: 
                     targets.append(current_r)
             except Exception as e:
                 print(f"  Error parsing time for {course} {current_r}R: {e}")
+        
+        if not targets and closest_min != 999:
+            # ターゲットが1つもない場合、一番近い時間を参考値として出す (デバッグ用)
+            pass # ログがうるさくなるので、必要ならここに出力を追加
+
         return targets
 
     def fetch_race_data(self, course, rno, date_str):
-        # リストページへの参照も保存されたものを使う
-        list_url = self.course_links.get(course, f"{self.LIST_URL}?jcd={self.COURSE_MAP[course]}&hd={date_str}")
+        list_url = self.course_links.get(course, f"{self.LIST_URL}?jcd={self.COURSE_MAP.get(course, '01')}&hd={date_str}")
         try:
-            # 出走表(詳細)のリクエスト
-            race_list_url = f"{self.LIST_URL}?rno={rno}&jcd={self.COURSE_MAP[course]}&hd={date_str}"
+            race_list_url = f"{self.LIST_URL}?rno={rno}&jcd={self.COURSE_MAP.get(course, '01')}&hd={date_str}"
             soup_list = self._get_soup(race_list_url, referer=list_url)
             if not soup_list: return None
             
             deadline_str = "00:00"
-            m_time = re.search(r"締切予定.*?(\d{1,2}:\d{2})", soup_list.get_text())
+            m_time = re.search(r"締切予定.*?(\d{1,2}:\d{2})", soup_list.get_text(separator=' '))
             if m_time: deadline_str = m_time.group(1).zfill(5)
             
             # 直前情報のURL
