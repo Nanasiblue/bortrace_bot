@@ -79,6 +79,8 @@ class BoatRaceScraperV5:
                 headers = {"Referer": referer} if referer else {}
                 res = self.session.get(url, headers=headers, timeout=20)
                 res.raise_for_status()
+                # 文字化け対策: 明示的にエンコーディングを設定
+                res.encoding = res.apparent_encoding or "utf-8"
                 return BeautifulSoup(res.content, "html.parser")
             except Exception as e:
                 wait = (i + 1) * 3
@@ -137,7 +139,16 @@ class BoatRaceScraperV5:
             print(f"  ⚠️ No deadline found in {course}. (Title: {title})")
             return []
 
-        closest_min = 999
+        # 動作確認用: 最初に見つかったレースの時刻を出す (5-45分前なら詳細ログ、そうでなければ簡易ログ)
+        first_time = all_deadlines[0]
+        try:
+            f_dt = datetime.strptime(f"{date_str} {first_time.zfill(5)}", "%Y%m%d %H:%M").replace(tzinfo=JST)
+            f_min = (f_dt - now_dt).total_seconds() / 60
+            # 範囲外でも、解析が動いていることを示すために1件だけログを出す
+            if not (5 <= f_min <= 45):
+                print(f"  (Detected {course} 1R at {first_time}, {f_min:.1f} min from now)")
+        except: pass
+
         for i, time_str in enumerate(all_deadlines):
             current_r = i + 1
             if current_r > 12: break
@@ -148,8 +159,6 @@ class BoatRaceScraperV5:
                 # ログ表示 (5-45分前なら表示)
                 if 5 <= minutes <= 45:
                     print(f"  - {course} {current_r}R: 締切まで {minutes:.1f}分 ({time_str})")
-                elif abs(minutes) < abs(closest_min):
-                    closest_min = minutes
 
                 # 判定: 5分〜35分前
                 if 5 <= minutes <= 35: 
@@ -157,25 +166,22 @@ class BoatRaceScraperV5:
             except Exception as e:
                 print(f"  Error parsing time for {course} {current_r}R: {e}")
         
-        if not targets and closest_min != 999:
-            # ターゲットが1つもない場合、一番近い時間を参考値として出す (デバッグ用)
-            pass # ログがうるさくなるので、必要ならここに出力を追加
-
         return targets
 
     def fetch_race_data(self, course, rno, date_str):
-        list_url = self.course_links.get(course, f"{self.LIST_URL}?jcd={self.COURSE_MAP.get(course, '01')}&hd={date_str}")
+        jcd = self.COURSE_MAP.get(course, "01")
+        list_url = self.course_links.get(course, f"{self.LIST_URL}?jcd={jcd}&hd={date_str}")
         try:
-            race_list_url = f"{self.LIST_URL}?rno={rno}&jcd={self.COURSE_MAP.get(course, '01')}&hd={date_str}"
+            race_list_url = f"{self.LIST_URL}?rno={rno}&jcd={jcd}&hd={date_str}"
             soup_list = self._get_soup(race_list_url, referer=list_url)
             if not soup_list: return None
             
             deadline_str = "00:00"
-            m_time = re.search(r"締切予定.*?(\d{1,2}:\d{2})", soup_list.get_text(separator=' '))
+            m_time = re.search(r"締切予定\s*(\d{1,2}:\d{2})", soup_list.get_text(separator=' '))
             if m_time: deadline_str = m_time.group(1).zfill(5)
             
             # 直前情報のURL
-            info_url = f"{self.BASE_URL}?rno={rno}&jcd={self.COURSE_MAP[course]}&hd={date_str}"
+            info_url = f"{self.BASE_URL}?rno={rno}&jcd={jcd}&hd={date_str}"
             soup_info = self._get_soup(info_url, referer=race_list_url)
             if not soup_info or "データがありません" in soup_info.text: return None
             
