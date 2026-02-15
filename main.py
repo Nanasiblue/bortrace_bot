@@ -106,6 +106,10 @@ class BoatRaceScraperV5:
             # 出走表ページへのリンクのみを対象とする
             if "racelist" not in href:
                 continue
+            
+            # rnoが含まれている場合、それを除外して「会場の全レース一覧」のURLにする
+            # これをしないと、1Rだけのページを掴んでしまい、2R以降を見失う原因になる
+            href = re.sub(r"([?&])rno=\d+&?", r"\1", href).rstrip("&? ")
                 
             m = re.search(r"jcd=(\d{2})", href)
             if m and m.group(1) in inv_map:
