@@ -89,7 +89,7 @@ class BoatRaceScraperV5:
         return None
 
     def fetch_all_targets(self, date_str, now_dt):
-        """Indexページ(開催一覧)から、全会場の全レースの締切を効率的に把握する"""
+        """Indexページ(開催一覧)の表を走査し、全会場・全12レースの締切を網羅的に取得する"""
         print(f"[{datetime.now(JST).strftime('%H:%M:%S')}] 🔍 Scanning Index for targets...")
         url = f"{self.INDEX_URL}?hd={date_str}"
         soup = self._get_soup(url, referer="https://www.boatrace.jp/")
@@ -98,45 +98,48 @@ class BoatRaceScraperV5:
         inv_map = {v: k for k, v in self.COURSE_MAP.items()}
         targets = []
         
-        # 画面上の全ての出走表リンクを走査
-        race_links = soup.select("a[href*='racelist']")
-        for link in race_links:
-            href = link.get('href', '')
-            txt = link.get_text().strip()
+        # テーブルの各行(tr)を走査
+        rows = soup.select("tr")
+        for row in rows:
+            # 会場コードを含むリンクを探して会場名を特定
+            venue_link = row.select_one("a[href*='jcd=']")
+            if not venue_link: continue
             
-            # HH:MM の形式が含まれているか
-            m_time = re.search(r"(\d{1,2}:\d{2})", txt)
-            if not m_time: continue
+            m_jcd = re.search(r"jcd=(\d{2})", venue_link.get('href', ''))
+            if not m_jcd: continue
             
-            time_str = m_time.group(1).zfill(5)
-            jcd_m = re.search(r"jcd=(\d{2})", href)
-            rno_m = re.search(r"rno=(\d{1,2})", href)
+            jcd = m_jcd.group(1)
+            course = inv_map.get(jcd)
+            if not course: continue
             
-            if jcd_m and rno_m:
-                jcd = jcd_m.group(1)
-                rno = int(rno_m.group(1))
-                course = inv_map.get(jcd)
-                if not course: continue
+            # その行にある全てのセル(td)を走査
+            cells = row.select("td")
+            r_idx = 1
+            for cell in cells:
+                txt = cell.get_text().strip()
+                m_time = re.search(r"(\d{1,2}:\d{2})", txt)
+                if not m_time: continue
                 
+                time_str = m_time.group(1).zfill(5)
                 try:
                     race_dt = datetime.strptime(f"{date_str} {time_str}", "%Y%m%d %H:%M").replace(tzinfo=JST)
                     minutes = (race_dt - now_dt).total_seconds() / 60
                     
-                    full_url = "https://www.boatrace.jp" + href if href.startswith("/") else href
-                    
                     # ログ表示 (5-45分前なら表示)
                     if 5 <= minutes <= 45:
-                        print(f"  - {course} {rno}R: 締切まで {minutes:.1f}分 ({time_str})")
+                        print(f"  - {course} {r_idx}R: 締切まで {minutes:.1f}分 ({time_str})")
 
                     # 判定: 5分〜35分前
                     if 5 <= minutes <= 35: 
                         targets.append({
                             "course": course,
-                            "rno": rno,
+                            "rno": r_idx,
                             "time": time_str,
-                            "url": full_url
+                            "url": f"{self.LIST_URL}?rno={r_idx}&jcd={jcd}&hd={date_str}"
                         })
                 except: pass
+                # 時刻が見つかったら、それは1レース分なのでカウントを進める
+                r_idx += 1
                 
         return targets
 
