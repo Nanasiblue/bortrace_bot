@@ -98,8 +98,13 @@ class BoatRaceScraperV5:
         inv_map = {v: k for k, v in self.COURSE_MAP.items()}
         
         # indexページにある実際のリンク(href)を抽出して保存する
+        # racelist へのリンク（出走表）のみを抽出するようにフィルタリング
         for link in soup.select("a[href*='jcd=']"):
             href = link.get('href', '')
+            # 出走表ページへのリンクのみを対象とする
+            if "racelist" not in href:
+                continue
+                
             m = re.search(r"jcd=(\d{2})", href)
             if m and m.group(1) in inv_map:
                 name = inv_map[m.group(1)]
