@@ -55,96 +55,115 @@ class BoatRaceScraperV5:
     }
 
     def __init__(self):
-        # よりブラウザに近いヘッダー設定（不正アクセス判定を回避）
+        # よりブラウザに近いヘッダー設定
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
             "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1"
         }
         self.session = requests.Session()
         self.session.headers.update(self.headers)
+        self.course_links = {} # {course_name: list_url}
+        self.date_str = ""
+        
+        # セッションの初期化 (Warm-up)
+        try:
+            self.session.get("https://www.boatrace.jp/", timeout=15)
+        except: pass
 
     def _get_soup(self, url, referer=None, retries=3):
         for i in range(retries):
             try:
-                headers = {}
-                if referer:
-                    headers["Referer"] = referer
-                
-                res = self.session.get(url, headers=headers, timeout=30)
+                headers = {"Referer": referer} if referer else {}
+                res = self.session.get(url, headers=headers, timeout=20)
                 res.raise_for_status()
                 return BeautifulSoup(res.content, "html.parser")
             except Exception as e:
-                wait = (i + 1) * 5
-                print(f"[{datetime.now(JST).strftime('%H:%M:%S')}] ⚠️ Retry {i+1}/{retries}: {url} (Wait {wait}s) - {e}")
+                wait = (i + 1) * 3
+                print(f"[{datetime.now(JST).strftime('%H:%M:%S')}] ⚠️ Retry {i+1}/{retries}: {url} - {e}")
                 time.sleep(wait)
         return None
 
     def fetch_active_courses(self, date_str):
+        self.date_str = date_str
         print(f"[{datetime.now(JST).strftime('%H:%M:%S')}] 🔍 Fetching active courses...")
-        url = f"{self.INDEX_URL}?hd={date_str}"
-        soup = self._get_soup(url)
+        index_url = f"{self.INDEX_URL}?hd={date_str}"
+        soup = self._get_soup(index_url, referer="https://www.boatrace.jp/")
         if not soup: return []
+        
+        self.course_links = {}
         active_courses = []
         inv_map = {v: k for k, v in self.COURSE_MAP.items()}
+        
+        # indexページにある実際のリンク(href)を抽出して保存する
         for link in soup.select("a[href*='jcd=']"):
-            m = re.search(r"jcd=(\d{2})", link['href'])
+            href = link.get('href', '')
+            m = re.search(r"jcd=(\d{2})", href)
             if m and m.group(1) in inv_map:
-                active_courses.append(inv_map[m.group(1)])
+                name = inv_map[m.group(1)]
+                if href.startswith("/"):
+                    href = "https://www.boatrace.jp" + href
+                self.course_links[name] = href
+                active_courses.append(name)
+        
         return sorted(list(set(active_courses)))
 
     def get_target_races_for_course(self, course, date_str, now_dt):
-        jcd = self.COURSE_MAP[course]
-        url = f"{self.LIST_URL}?jcd={jcd}&hd={date_str}"
-        # IndexをRefererに指定
-        ref_url = f"{self.INDEX_URL}?hd={date_str}"
-        soup = self._get_soup(url, referer=ref_url)
+        # 自分でURLを組み立てず、indexページから抽出したリンクをそのまま使う
+        url = self.course_links.get(course)
+        if not url:
+            jcd = self.COURSE_MAP[course]
+            url = f"{self.LIST_URL}?jcd={jcd}&hd={date_str}"
+            
+        index_url = f"{self.INDEX_URL}?hd={date_str}"
+        soup = self._get_soup(url, referer=index_url)
         targets = []
         if not soup:
             print(f"  ❌ Failed to get race list for {course}")
             return []
         
-        # テキスト全体から「締切予定 12:34」を抽出
         page_text = soup.get_text().replace("\n", " ").replace("\r", " ").strip()
         all_deadlines = re.findall(r"締切予定.*?(\d{1,2}:\d{2})", page_text)
         
         if not all_deadlines:
-            # 取得失敗時に構造のヒントを出す
-            print(f"  ⚠️ No deadline found in {course}. Snippet: {page_text[:60].replace(' ', '')}...")
+            # 取得失敗時にタイトルなどを表示して原因を探る
+            title = soup.title.string if soup.title else "No Title"
+            print(f"  ⚠️ No deadline found in {course}. (Title: {title})")
             return []
 
-        # 通常、1つの会場には12レースある。見つかった「締切予定」を順番に 1R... とみなす
         for i, time_str in enumerate(all_deadlines):
             current_r = i + 1
             if current_r > 12: break
-            
             try:
                 race_dt = datetime.strptime(f"{date_str} {time_str.zfill(5)}", "%Y%m%d %H:%M").replace(tzinfo=JST)
                 minutes = (race_dt - now_dt).total_seconds() / 60
-                
-                # 5分〜45分前ならログを出す
                 if 5 <= minutes <= 45:
                     print(f"  - {course} {current_r}R: 締切まで {minutes:.1f}分 ({time_str})")
-
-                # 5分〜35分前なら実走
                 if 5 <= minutes <= 35: 
                     targets.append(current_r)
             except Exception as e:
                 print(f"  Error parsing time for {course} {current_r}R: {e}")
-                
         return targets
 
     def fetch_race_data(self, course, rno, date_str):
-        jcd = self.COURSE_MAP[course]
-        ref_url = f"{self.LIST_URL}?jcd={jcd}&hd={date_str}"
+        # リストページへの参照も保存されたものを使う
+        list_url = self.course_links.get(course, f"{self.LIST_URL}?jcd={self.COURSE_MAP[course]}&hd={date_str}")
         try:
-            url_list = f"{self.LIST_URL}?rno={rno}&jcd={jcd}&hd={date_str}"
-            soup_list = self._get_soup(url_list, referer=ref_url)
+            # 出走表(詳細)のリクエスト
+            race_list_url = f"{self.LIST_URL}?rno={rno}&jcd={self.COURSE_MAP[course]}&hd={date_str}"
+            soup_list = self._get_soup(race_list_url, referer=list_url)
             if not soup_list: return None
             
             deadline_str = "00:00"
             m_time = re.search(r"締切予定.*?(\d{1,2}:\d{2})", soup_list.get_text())
             if m_time: deadline_str = m_time.group(1).zfill(5)
+            
+            # 直前情報のURL
+            info_url = f"{self.BASE_URL}?rno={rno}&jcd={self.COURSE_MAP[course]}&hd={date_str}"
+            soup_info = self._get_soup(info_url, referer=race_list_url)
+            if not soup_info or "データがありません" in soup_info.text: return None
             
             bodies = soup_list.select("tbody.is-fs12") or soup_list.select("tbody")
             
