@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 JST = timezone(timedelta(hours=9), 'JST')
 
-# モデルファイルのパス 
+# モデルファイルのパス (GitHub Actions等での動作を想定し相対パスで定義)
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "final_model_v4.pkl"
 CONFIG_PATH = BASE_DIR / "model_config_v4.pkl"
@@ -38,7 +38,8 @@ def save_notified_race(race_id):
         f.write(race_id + "\n")
 
 # ==========================================
-# 1. スクレイパー (v5: ログ強化版)
+# ==========================================
+# 1. スクレイパー (v5: 指紋偽装・Referer強化版)
 # ==========================================
 class BoatRaceScraperV5:
     BASE_URL = "https://www.boatrace.jp/owpc/pc/race/beforeinfo"
@@ -54,17 +55,23 @@ class BoatRaceScraperV5:
     }
 
     def __init__(self):
-        self.headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        # Sessionを導入してコネクションを使い回す
+        # よりブラウザに近いヘッダー設定（不正アクセス判定を回避）
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+        }
         self.session = requests.Session()
         self.session.headers.update(self.headers)
 
-    def _get_soup(self, url, retries=3):
-        """強化されたスープ取得メソッド（タイムアウト30秒、指数バックオフ付き）"""
+    def _get_soup(self, url, referer=None, retries=3):
         for i in range(retries):
             try:
-                # print(f"  [Request] {url}") # 詳細すぎてうるさい場合はコメントアウト
-                res = self.session.get(url, timeout=30)
+                headers = {}
+                if referer:
+                    headers["Referer"] = referer
+                
+                res = self.session.get(url, headers=headers, timeout=30)
                 res.raise_for_status()
                 return BeautifulSoup(res.content, "html.parser")
             except Exception as e:
@@ -75,7 +82,8 @@ class BoatRaceScraperV5:
 
     def fetch_active_courses(self, date_str):
         print(f"[{datetime.now(JST).strftime('%H:%M:%S')}] 🔍 Fetching active courses...")
-        soup = self._get_soup(f"{self.INDEX_URL}?hd={date_str}")
+        url = f"{self.INDEX_URL}?hd={date_str}"
+        soup = self._get_soup(url)
         if not soup: return []
         active_courses = []
         inv_map = {v: k for k, v in self.COURSE_MAP.items()}
@@ -88,21 +96,24 @@ class BoatRaceScraperV5:
     def get_target_races_for_course(self, course, date_str, now_dt):
         jcd = self.COURSE_MAP[course]
         url = f"{self.LIST_URL}?jcd={jcd}&hd={date_str}"
-        soup = self._get_soup(url)
+        # IndexをRefererに指定
+        ref_url = f"{self.INDEX_URL}?hd={date_str}"
+        soup = self._get_soup(url, referer=ref_url)
         targets = []
         if not soup:
             print(f"  ❌ Failed to get race list for {course}")
             return []
         
-        # サイト構造の変更に強い抽出方法：テキスト全体から「締切予定 12:34」のパターンをすべて探す
-        page_text = soup.get_text().replace("\n", " ").replace("\r", " ")
+        # テキスト全体から「締切予定 12:34」を抽出
+        page_text = soup.get_text().replace("\n", " ").replace("\r", " ").strip()
         all_deadlines = re.findall(r"締切予定.*?(\d{1,2}:\d{2})", page_text)
         
         if not all_deadlines:
-            print(f"  ⚠️ No deadline found in {course}. (Is the day over or site layout changed?)")
+            # 取得失敗時に構造のヒントを出す
+            print(f"  ⚠️ No deadline found in {course}. Snippet: {page_text[:60].replace(' ', '')}...")
             return []
 
-        # 通常、1つの会場には12レースある。見つかった「締切予定」を順番に 1R, 2R... とみなす
+        # 通常、1つの会場には12レースある。見つかった「締切予定」を順番に 1R... とみなす
         for i, time_str in enumerate(all_deadlines):
             current_r = i + 1
             if current_r > 12: break
@@ -111,11 +122,11 @@ class BoatRaceScraperV5:
                 race_dt = datetime.strptime(f"{date_str} {time_str.zfill(5)}", "%Y%m%d %H:%M").replace(tzinfo=JST)
                 minutes = (race_dt - now_dt).total_seconds() / 60
                 
-                # 5分〜45分前ならログを出す (デバッグ用)
+                # 5分〜45分前ならログを出す
                 if 5 <= minutes <= 45:
                     print(f"  - {course} {current_r}R: 締切まで {minutes:.1f}分 ({time_str})")
 
-                # 5分〜35分前なら実走 (ユーザーの要望に合わせて緩和)
+                # 5分〜35分前なら実走
                 if 5 <= minutes <= 35: 
                     targets.append(current_r)
             except Exception as e:
@@ -125,8 +136,10 @@ class BoatRaceScraperV5:
 
     def fetch_race_data(self, course, rno, date_str):
         jcd = self.COURSE_MAP[course]
+        ref_url = f"{self.LIST_URL}?jcd={jcd}&hd={date_str}"
         try:
-            soup_list = self._get_soup(f"{self.LIST_URL}?rno={rno}&jcd={jcd}&hd={date_str}")
+            url_list = f"{self.LIST_URL}?rno={rno}&jcd={jcd}&hd={date_str}"
+            soup_list = self._get_soup(url_list, referer=ref_url)
             if not soup_list: return None
             
             deadline_str = "00:00"
