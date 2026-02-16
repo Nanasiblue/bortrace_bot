@@ -17,9 +17,8 @@ JST = timezone(timedelta(hours=9), 'JST')
 
 # パスの自動解決：GitHub Actions等の環境でも確実にファイルを見つける
 BASE_DIR = Path(__file__).resolve().parent
-# モデルは output_v4 サブフォルダ内にある
-MODEL_PATH = BASE_DIR / "output_v4" / "final_model_v4.pkl"
-CONFIG_PATH = BASE_DIR / "output_v4" / "model_config_v4.pkl"
+MODEL_PATH = BASE_DIR / "final_model_v4.pkl"
+CONFIG_PATH = BASE_DIR / "model_config_v4.pkl"
 
 # 通知済みログファイル (スクリプトと同じ場所に作成)
 LOG_FILE = BASE_DIR / "notified_races.log"
