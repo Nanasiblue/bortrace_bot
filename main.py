@@ -155,7 +155,7 @@ class BoatRaceScraperV5:
         print(f"  - Total unique races logged for today: {len(all_schedules)}")
         return all_schedules
 
-    def fetch_race_data(self, course, rno, date_str, race_url=None):
+    def fetch_race_data(self, course, rno, date_str, race_url=None, deadline=None):
         """出走表(詳細)と直前情報を取得"""
         jcd = self.COURSE_MAP.get(course, "01")
         # 直接URLが指定されていない場合は構築する
@@ -165,9 +165,11 @@ class BoatRaceScraperV5:
             soup_list = self._get_soup(race_list_url, referer=f"{self.INDEX_URL}?hd={date_str}")
             if not soup_list: return None
             
-            deadline_str = "00:00"
-            m_time = re.search(r"締切予定\s*(\d{1,2}:\d{2})", soup_list.get_text(separator=' '))
-            if m_time: deadline_str = m_time.group(1).zfill(5)
+            # 締切時刻が引数で渡されていない場合はページから抽出を試みる
+            deadline_str = deadline if deadline else "00:00"
+            if not deadline:
+                m_time = re.search(r"(\d{1,2}:\d{2})", soup_list.get_text(separator=' '))
+                if m_time: deadline_str = m_time.group(1).zfill(5)
             
             # 直前情報のURL
             info_url = f"{self.BASE_URL}?rno={rno}&jcd={jcd}&hd={date_str}"
@@ -218,12 +220,11 @@ class BoatRaceScraperV5:
             return data
         except: return None
 
-# ==========================================
 # 2. 予測ロジック
 # ==========================================
-def predict_single(model, config, scraper, course, rno, date_str, race_url=None):
+def predict_single(model, config, scraper, course, rno, date_str, race_url=None, deadline=None):
     try:
-        data = scraper.fetch_race_data(course, rno, date_str, race_url=race_url)
+        data = scraper.fetch_race_data(course, rno, date_str, race_url=race_url, deadline=deadline)
         if not data: 
             print(f"  ⚠️ Failed to fetch detail data for {course} {rno}R")
             return None, -1
@@ -268,7 +269,7 @@ def predict_single(model, config, scraper, course, rno, date_str, race_url=None)
             "イン飛び率": in_jump_prob, "戦略": strategy,
             "1位": top1, "2位": top2, "3位": top3,
             "根拠": f"1号艇:{data['rank_1']} / 展示:{int(input_dict['ex_rank_1'])}位",
-            "買い目": f"{top1[0]}-{top2[0]}{top3[0]}-全" if strategy != "WIDE" else "1抜きBOX推奨"
+            "買い目": f"{top1[0]} - {top2[0]}, {top3[0]} - 全" if strategy != "WIDE" else "1抜きBOX推奨"
         }
         return res_dict, 1
         
@@ -326,7 +327,7 @@ def run_live_patrol():
         race_id = race['id']
         
         print(f"  - {course} {rno}R: Analyzing... (Deadline: {race['time']})")
-        res, status = predict_single(model, config, scraper, course, rno, date_str, race_url=race['url'])
+        res, status = predict_single(model, config, scraper, course, rno, date_str, race_url=race['url'], deadline=race['time'])
         
         if status == 1:
             hit_count += 1
