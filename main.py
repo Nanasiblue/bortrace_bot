@@ -17,11 +17,12 @@ JST = timezone(timedelta(hours=9), 'JST')
 
 # パスの自動解決：GitHub Actions等の環境でも確実にファイルを見つける
 BASE_DIR = Path(__file__).resolve().parent
-MODEL_PATH = BASE_DIR / "final_model_v4.pkl"
-CONFIG_PATH = BASE_DIR / "model_config_v4.pkl"
+# モデルは output_v4 サブフォルダ内にある
+MODEL_PATH = BASE_DIR / "output_v4" / "final_model_v4.pkl"
+CONFIG_PATH = BASE_DIR / "output_v4" / "model_config_v4.pkl"
 
-# 通知済みログファイル
-LOG_FILE = Path("notified_races.log")
+# 通知済みログファイル (スクリプトと同じ場所に作成)
+LOG_FILE = BASE_DIR / "notified_races.log"
 
 # ==========================================
 # 重複通知防止ロジック
@@ -88,60 +89,72 @@ class BoatRaceScraperV5:
                 time.sleep(wait)
         return None
 
-    def fetch_all_targets(self, date_str, now_dt):
-        """Indexページ(開催一覧)の表を走査し、全会場・全12レースの締切を網羅的に取得する"""
-        print(f"[{datetime.now(JST).strftime('%H:%M:%S')}] 🔍 Scanning Index for targets...")
-        url = f"{self.INDEX_URL}?hd={date_str}"
-        soup = self._get_soup(url, referer="https://www.boatrace.jp/")
-        if not soup: return []
-        
-        inv_map = {v: k for k, v in self.COURSE_MAP.items()}
-        targets = []
-        
-        # テーブルの各行(tr)を走査
-        rows = soup.select("tr")
-        for row in rows:
-            # 会場コードを含むリンクを探して会場名を特定
-            venue_link = row.select_one("a[href*='jcd=']")
-            if not venue_link: continue
-            
-            m_jcd = re.search(r"jcd=(\d{2})", venue_link.get('href', ''))
-            if not m_jcd: continue
-            
-            jcd = m_jcd.group(1)
-            course = inv_map.get(jcd)
-            if not course: continue
-            
-            # その行にある全てのセル(td)を走査
-            cells = row.select("td")
-            r_idx = 1
-            for cell in cells:
-                txt = cell.get_text().strip()
-                m_time = re.search(r"(\d{1,2}:\d{2})", txt)
-                if not m_time: continue
-                
-                time_str = m_time.group(1).zfill(5)
-                try:
-                    race_dt = datetime.strptime(f"{date_str} {time_str}", "%Y%m%d %H:%M").replace(tzinfo=JST)
-                    minutes = (race_dt - now_dt).total_seconds() / 60
-                    
-                    # ログ表示 (5-45分前なら表示)
-                    if 5 <= minutes <= 45:
-                        print(f"  - {course} {r_idx}R: 締切まで {minutes:.1f}分 ({time_str})")
+    def fetch_all_venue_schedules(self, date_str):
+        """全会場の1R〜12Rスケジュールを網羅的に取得する (最速・確実版)"""
+        print(f"[{datetime.now(JST).strftime('%H:%M:%S')}] 🏟️  Retrieving daily schedules for all venues...")
+        index_url = f"{self.INDEX_URL}?hd={date_str}"
+        soup_index = self._get_soup(index_url, referer="https://www.boatrace.jp/")
+        if not soup_index: return {}
 
-                    # 判定: 5分〜35分前
-                    if 5 <= minutes <= 35: 
-                        targets.append({
-                            "course": course,
-                            "rno": r_idx,
-                            "time": time_str,
-                            "url": f"{self.LIST_URL}?rno={r_idx}&jcd={jcd}&hd={date_str}"
-                        })
-                except: pass
-                # 時刻が見つかったら、それは1レース分なのでカウントを進める
-                r_idx += 1
+        # 1. 開催されている会場を特定
+        active_venues = {} # jcd -> course_name
+        inv_map = {v: k for k, v in self.COURSE_MAP.items()}
+        for link in soup_index.select("a[href*='jcd=']"):
+            href = link.get('href', '')
+            m_jcd = re.search(r"jcd=(\d{2})", href)
+            if m_jcd:
+                jcd = m_jcd.group(1)
+                if jcd in inv_map:
+                    active_venues[jcd] = inv_map[jcd]
+
+        venue_list = sorted(list(set(active_venues.values())))
+        print(f"  - Active Venues ({len(venue_list)}): {', '.join(venue_list)}")
+        
+        all_schedules = {} # (course, rno) -> (time_str, race_url)
+        processed_links = set() # 重複リンク排除用
+        
+        # 2. 各会場の「本日の一覧(raceindex)」から全12レースを取得
+        for jcd, course in active_venues.items():
+            venue_url = f"https://www.boatrace.jp/owpc/pc/race/raceindex?jcd={jcd}&hd={date_str}"
+            soup_v = self._get_soup(venue_url, referer=index_url)
+            if not soup_v:
+                print(f"    ⚠️ Failed to load venue page: {course}")
+                continue
+            
+            # 手動フィルタリングで確実に抽出
+            links = soup_v.find_all("a")
+            v_count = 0
+            for link in links:
+                href = link.get('href', '')
+                if 'racelist' not in href or 'rno=' not in href:
+                    continue
                 
-        return targets
+                # 同一レースの重複リンク（ボタンなど）をスキップ
+                if href in processed_links:
+                    continue
+                processed_links.add(href)
+
+                m_rno = re.search(r"rno=(\d{1,2})", href)
+                if not m_rno: continue
+                rno = int(m_rno.group(1))
+                
+                # 時刻は親の tr 全体から探す（会場によって隣の td にある場合があるため）
+                container = link.find_parent("tr")
+                txt = container.get_text(separator=' ').strip().replace('\n', ' ') if container else ""
+                
+                # HH:MM を探す
+                m_time = re.search(r"(\d{1,2}:\d{2})", txt)
+                if m_time:
+                    time_str = m_time.group(1).zfill(5)
+                    full_url = "https://www.boatrace.jp" + href if href.startswith("/") else href
+                    all_schedules[(course, rno)] = (time_str, full_url)
+                    v_count += 1
+            
+            # print(f"    ✅ {course}: {v_count} races found")
+            time.sleep(0.3) # 負荷軽減
+            
+        print(f"  - Total unique races logged for today: {len(all_schedules)}")
+        return all_schedules
 
     def fetch_race_data(self, course, rno, date_str, race_url=None):
         """出走表(詳細)と直前情報を取得"""
@@ -282,23 +295,37 @@ def run_live_patrol():
     now_jst = datetime.now(JST)
     date_str = now_jst.strftime("%Y%m%d")
     
-    # 全会場のターゲットレースを一覧ページから一括取得
-    targets = scraper.fetch_all_targets(date_str, now_jst)
+    # 1. 1日の全スケジュールを取得 (初回、または1時間ごとに更新すると効率的)
+    all_races = scraper.fetch_all_venue_schedules(date_str)
     
+    # 2. 現在のターゲット (5分〜35分前) を抽出
+    targets = []
+    print(f"[{datetime.now(JST).strftime('%H:%M:%S')}] 🔍 Filtering targets from schedule...")
+    for (course, rno), (time_str, race_url) in sorted(all_races.items()):
+        try:
+            race_dt = datetime.strptime(f"{date_str} {time_str}", "%Y%m%d %H:%M").replace(tzinfo=JST)
+            diff = (race_dt - now_jst).total_seconds() / 60
+            
+            # デバッグ表示: 窓に近いものを出す
+            if 0 <= diff <= 45:
+                print(f"  - {course} {rno}R: {time_str} (in {diff:.1f}m)")
+
+            if 5 <= diff <= 35:
+                # 重複通知チェック
+                race_id = f"{date_str}_{course}_{rno}"
+                if not is_already_notified(race_id):
+                    targets.append({"course": course, "rno": rno, "time": time_str, "url": race_url, "id": race_id})
+        except: pass
+
     hit_count = 0
     if not targets:
-        print("  (No target races within 5-35 min window found on Index page)")
+        print("  (No new target races in the 5-35 min window)")
         
     for race in targets:
         course = race['course']
         rno = race['rno']
-        race_id = f"{date_str}_{course}_{rno}"
+        race_id = race['id']
         
-        # 通知済みならスキップ
-        if is_already_notified(race_id):
-            print(f"  - {course} {rno}R: Already notified, skipping.")
-            continue
-
         print(f"  - {course} {rno}R: Analyzing... (Deadline: {race['time']})")
         res, status = predict_single(model, config, scraper, course, rno, date_str, race_url=race['url'])
         
