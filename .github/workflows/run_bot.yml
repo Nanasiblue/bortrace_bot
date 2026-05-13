@@ -2,10 +2,11 @@ name: Boatrace Smart Patrol
 
 on:
   schedule:
-    # 日本時間 8:30〜21:00頃 だけ動かす設定
-    # UTC記述なので「23:30〜12:00」を指定
-    # 23時台(前日)と、0時〜12時まで、15分おきに実行
-    - cron: '*/15 23,0-12 * * *'
+    # 日本時間 8:30〜21:00まで15分おきに実行
+    # GitHub Actions の cron は UTC
+    - cron: '30,45 23 * * *'
+    - cron: '*/15 0-11 * * *'
+    - cron: '0 12 * * *'
   workflow_dispatch:
 
 jobs:
@@ -14,29 +15,29 @@ jobs:
     timeout-minutes: 10
 
     steps:
-    - name: Check out
-      uses: actions/checkout@v3
+      - name: Check out
+        uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.9'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
 
-    # キャッシュを使ってインストール時間を短縮（節約技）
-    - name: Cache pip
-      uses: actions/cache@v3
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
-    - name: Install dependencies
-      run: |
-        pip install -r requirements.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-    - name: Run Patrol
-      env:
-        DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-      run: |
-        python main.py
+      - name: Run Patrol
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          python main.py
