@@ -256,23 +256,43 @@ def predict_single(model, config, scraper, course, rno, date_str, race_url=None,
         in_win_prob = probs[0]
         in_jump_prob = 1 - in_win_prob
         
-        in_jump_prob = 1 - probs[0]
-        ranking = sorted({i+1: p for i, p in enumerate(probs) if i > 0}.items(), key=lambda x: x[1], reverse=True)
-        top1, top2, top3 = ranking[0], ranking[1], ranking[2]
+        # 全艇のAI勝率ランキング
+        all_ranking = sorted(
+            {i + 1: p for i, p in enumerate(probs)}.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )
+        
+        # 1号艇を除いたランキング
+        ranking_without_1 = [r for r in all_ranking if r[0] != 1]
+        
+        top1, top2, top3 = ranking_without_1[0], ranking_without_1[1], ranking_without_1[2]
+        lower_ranking = ranking_without_1[3:]
         
         strategy = ""
         if in_jump_prob >= 0.55:
-            if top1[1] >= 0.35: strategy = "FOCUS"
-            elif top1[1] >= 0.25: strategy = "STANDARD"
-            else: strategy = "WIDE"
+            if top1[1] >= 0.35:
+                strategy = "FOCUS"
+            elif top1[1] >= 0.25:
+                strategy = "STANDARD"
+            else:
+                strategy = "WIDE"
         
-        if not strategy: return None, 0
+        if not strategy:
+            return None, 0
 
         res_dict = {
-            "場名": course, "レース": f"{rno}R", "締切": data['deadline'],
+            "場名": course,
+            "レース": f"{rno}R",
+            "締切": data['deadline'],
             "1号艇勝率": in_win_prob,
-            "イン飛び率": in_jump_prob, "戦略": strategy,
-            "1位": top1, "2位": top2, "3位": top3,
+            "イン飛び率": in_jump_prob,
+            "戦略": strategy,
+            "1位": top1,
+            "2位": top2,
+            "3位": top3,
+            "4位以下": lower_ranking,
+            "全体ランキング": all_ranking,
             "根拠": f"1号艇:{data['rank_1']} / 展示:{int(input_dict['ex_rank_1'])}位",
             "買い目": f"{top1[0]} - {top2[0]}, {top3[0]} - 全" if strategy != "WIDE" else "1抜きBOX推奨"
         }
@@ -340,15 +360,17 @@ def run_live_patrol():
             content = f"🎯 **投資チャンス到来！**\n📍 **{res['場名']} {res['レース']}** (締切 {res['締切']})\n"
             content += f"━━━━━━━━━━━━━━━━━━━━\n🔥 戦略: **{res['戦略']}**\n😱 イン飛び率: `{res['イン飛び率']:.1%}`\n\n"
             content += f"🏠 **1号艇勝率**: `{res['1号艇勝率']:.1%}`\n"
-            content += f"📊 **AI勝率ランキング (1抜き)**\n🥇 **{res['1位'][0]}号艇**: `{res['1位'][1]:.1%}`\n🥈 **{res['2位'][0]}号艇**: `{res['2位'][1]:.1%}`\n🥉 **{res['3位'][0]}号艇**: `{res['3位'][1]:.1%}`\n\n"
-            content += f"📝 根拠: {res['根拠']}\n💰 推奨: `{res['買い目']}`\n━━━━━━━━━━━━━━━━━━━━"
             
-            if DISCORD_WEBHOOK_URL:
-                try:
-                    requests.post(DISCORD_WEBHOOK_URL, json={"content": content}, timeout=15)
-                    print(f"    ✅ Notification Sent for {race_id}")
-                except Exception as e:
-                    print(f"    ❌ Discord Error: {e}")
+            content += f"📊 **AI勝率ランキング (1抜き)**\n"
+            content += f"🥇 **{res['1位'][0]}号艇**: `{res['1位'][1]:.1%}`\n"
+            content += f"🥈 **{res['2位'][0]}号艇**: `{res['2位'][1]:.1%}`\n"
+            content += f"🥉 **{res['3位'][0]}号艇**: `{res['3位'][1]:.1%}`\n"
+            
+            for idx, item in enumerate(res["4位以下"], start=4):
+                content += f"{idx}位 **{item[0]}号艇**: `{item[1]:.1%}`\n"
+            
+            content += "\n"
+            content += f"📝 根拠: {res['根拠']}\n💰 推奨: `{res['買い目']}`\n━━━━━━━━━━━━━━━━━━━━"
             
             # 通知済みリストに保存
             save_notified_race(race_id)
