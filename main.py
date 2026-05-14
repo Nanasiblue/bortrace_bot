@@ -371,6 +371,25 @@ def run_live_patrol():
             
             content += "\n"
             content += f"📝 根拠: {res['根拠']}\n💰 推奨: `{res['買い目']}`\n━━━━━━━━━━━━━━━━━━━━"
+
+            if DISCORD_WEBHOOK_URL:
+                try:
+                    response = requests.post(
+                        DISCORD_WEBHOOK_URL,
+                        json={"content": content},
+                        timeout=15
+                    )
+
+                    if 200 <= response.status_code < 300:
+                        print(f"    ✅ Notification Sent for {race_id}")
+                    else:
+                        print(f"    ❌ Discord Error for {race_id}: status={response.status_code}")
+                        print(f"    Response: {response.text[:300]}")
+
+                except Exception as e:
+                    print(f"    ❌ Discord Exception for {race_id}: {e}")
+            else:
+                print("    ⚠️ DISCORD_WEBHOOK_URL is not set")
             
             # 通知済みリストに保存
             save_notified_race(race_id)
