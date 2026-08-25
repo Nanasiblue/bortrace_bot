@@ -34,6 +34,7 @@ from live_thread_predict import (
 
 PREDICTION_WEBHOOK_ENV = "DISCORD_PREDICTION_WEBHOOK_URL"
 RESULTS_WEBHOOK_ENV = "DISCORD_RESULTS_WEBHOOK_URL"
+RESULT_SENT_DIR = OUTPUT_DIR / "live_thread_results"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OFFICIAL_MODELS_DIR = (
     OUTPUT_DIR / "official_models_final_2021_2025"
@@ -167,6 +168,32 @@ def save_prediction(date_str: str, record: dict[str, Any]) -> None:
         f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
 
 
+def latest_predictions_by_race(date_str: str) -> dict[str, dict[str, Any]]:
+    latest: dict[str, dict[str, Any]] = {}
+    for pred in load_thread_predictions(date_str):
+        race_data = pred.get("race", {})
+        race_id = f"{race_data.get('date')}_{str(race_data.get('jcd')).zfill(2)}_{race_data.get('rno')}"
+        latest[race_id] = pred
+    return latest
+
+
+def result_sent_path(date_str: str) -> Path:
+    RESULT_SENT_DIR.mkdir(parents=True, exist_ok=True)
+    return RESULT_SENT_DIR / f"sent_results_{date_str}.log"
+
+
+def is_result_sent(date_str: str, race_id: str) -> bool:
+    path = result_sent_path(date_str)
+    if not path.exists():
+        return False
+    return race_id in set(path.read_text(encoding="utf-8").splitlines())
+
+
+def mark_result_sent(date_str: str, race_id: str) -> None:
+    with result_sent_path(date_str).open("a", encoding="utf-8") as f:
+        f.write(race_id + "\n")
+
+
 def predict_and_post(args: argparse.Namespace, client: OfficialClient, race: RaceSchedule, models, candidate_model) -> None:
     now = datetime.now(JST)
     race_dir = client.fetch_race_pages(race)
@@ -259,18 +286,15 @@ def result_payload(pred: dict[str, Any], result: dict[str, Any]) -> dict[str, An
 
 def update_results_and_post(args: argparse.Namespace, client: OfficialClient) -> None:
     date_str = args.date or datetime.now(JST).strftime("%Y%m%d")
-    preds = load_thread_predictions(date_str)
-    latest: dict[str, dict[str, Any]] = {}
-    for pred in preds:
-        race_data = pred.get("race", {})
-        race_id = f"{race_data.get('date')}_{str(race_data.get('jcd')).zfill(2)}_{race_data.get('rno')}"
-        latest[race_id] = pred
+    latest = latest_predictions_by_race(date_str)
     webhook = os.environ.get(RESULTS_WEBHOOK_ENV)
     if not webhook:
         print(f"{RESULTS_WEBHOOK_ENV} is not set")
         return
     sent = 0
-    for pred in latest.values():
+    for race_id, pred in latest.items():
+        if is_result_sent(date_str, race_id):
+            continue
         race_data = pred["race"]
         race = RaceSchedule(
             date=str(race_data["date"]),
@@ -289,6 +313,7 @@ def update_results_and_post(args: argparse.Namespace, client: OfficialClient) ->
         if "winner" not in result:
             continue
         post_webhook(webhook, result_payload(pred, result))
+        mark_result_sent(date_str, race_id)
         sent += 1
         time.sleep(args.sleep_sec)
     print(f"results sent: {sent}")
@@ -309,8 +334,11 @@ def run_targets(args: argparse.Namespace) -> None:
     now = datetime.now(JST)
     models = load_position_models(Path(args.official_models_dir))
     candidate_model = load_candidate_model(Path(args.candidate_model))
+    already_predicted = set(latest_predictions_by_race(date_str))
     targets = []
     for race in races:
+        if race.race_id in already_predicted:
+            continue
         minutes = (race.deadline_dt - now).total_seconds() / 60.0
         if args.rno or args.force:
             targets.append(race)

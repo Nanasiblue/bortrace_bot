@@ -2,12 +2,15 @@ name: Boatrace Smart Patrol
 
 on:
   schedule:
-    # 日本時間 8:30〜21:00まで15分おきに実行
+    # 日本時間 8:30-21:00 まで15分おきに実行
     # GitHub Actions の cron は UTC
     - cron: '30,45 23 * * *'
     - cron: '*/15 0-11 * * *'
     - cron: '0 12 * * *'
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   run-bot:
@@ -21,7 +24,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: '3.11'
 
       - name: Cache pip
         uses: actions/cache@v4
@@ -31,13 +34,31 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
+      - name: Restore live state
+        uses: actions/cache@v4
+        with:
+          path: |
+            outputs/live_thread_predictions
+            outputs/live_thread_results
+          key: ${{ runner.os }}-live-state-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-live-state-
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Patrol
+      - name: Send predictions
         env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_PREDICTION_WEBHOOK_URL: ${{ secrets.DISCORD_PREDICTION_WEBHOOK_URL }}
+          DISCORD_RESULTS_WEBHOOK_URL: ${{ secrets.DISCORD_RESULTS_WEBHOOK_URL }}
         run: |
-          python main.py
+          python main.py --from-min 5 --to-min 35 --sleep-sec 0.5
+
+      - name: Send result updates
+        env:
+          DISCORD_PREDICTION_WEBHOOK_URL: ${{ secrets.DISCORD_PREDICTION_WEBHOOK_URL }}
+          DISCORD_RESULTS_WEBHOOK_URL: ${{ secrets.DISCORD_RESULTS_WEBHOOK_URL }}
+        run: |
+          python main.py --update-results --sleep-sec 0.5
