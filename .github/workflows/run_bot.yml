@@ -61,4 +61,4 @@ jobs:
           DISCORD_PREDICTION_WEBHOOK_URL: ${{ secrets.DISCORD_PREDICTION_WEBHOOK_URL }}
           DISCORD_RESULTS_WEBHOOK_URL: ${{ secrets.DISCORD_RESULTS_WEBHOOK_URL }}
         run: |
-          python main.py --update-results --sleep-sec 0.5
+          python main.py --update-results --result-lookback-days 2 --sleep-sec 0.5

@@ -48,17 +48,26 @@ DEFAULT_CANDIDATE_MODEL = (
 )
 
 
-def post_webhook(webhook_url: str, payload: dict[str, Any]) -> None:
+def post_webhook(webhook_url: str, payload: dict[str, Any], retries: int = 3) -> None:
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(
-        webhook_url,
-        data=data,
-        headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=20) as res:
-        if res.status >= 400:
-            raise RuntimeError(f"Discord webhook failed: HTTP {res.status}")
+    last_error: Exception | None = None
+    for attempt in range(1, retries + 1):
+        req = urllib.request.Request(
+            webhook_url,
+            data=data,
+            headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=20) as res:
+                if res.status < 400:
+                    return
+                raise RuntimeError(f"Discord webhook failed: HTTP {res.status}")
+        except Exception as exc:
+            last_error = exc
+            if attempt < retries:
+                time.sleep(2 * attempt)
+    raise RuntimeError(f"Discord webhook failed after {retries} attempts: {last_error}")
 
 
 def fmt(value: Any, digits: int = 2) -> str:
@@ -177,6 +186,14 @@ def latest_predictions_by_race(date_str: str) -> dict[str, dict[str, Any]]:
     return latest
 
 
+def result_update_dates(args: argparse.Namespace) -> list[str]:
+    base = datetime.strptime(args.date, "%Y%m%d") if args.date else datetime.now(JST).replace(tzinfo=None)
+    return [
+        (base - timedelta(days=offset)).strftime("%Y%m%d")
+        for offset in range(max(0, args.result_lookback_days) + 1)
+    ]
+
+
 def result_sent_path(date_str: str) -> Path:
     RESULT_SENT_DIR.mkdir(parents=True, exist_ok=True)
     return RESULT_SENT_DIR / f"sent_results_{date_str}.log"
@@ -220,12 +237,12 @@ def predict_and_post(args: argparse.Namespace, client: OfficialClient, race: Rac
         min_model_ev=args.min_model_ev,
         top_per_race=args.top_per_race,
     )
-    save_prediction(race.date, make_prediction_record(race, candidates, picks))
     webhook = os.environ.get(PREDICTION_WEBHOOK_ENV) or os.environ.get("DISCORD_WEBHOOK_URL")
     if not webhook:
         print(f"{PREDICTION_WEBHOOK_ENV} is not set")
         return
     post_webhook(webhook, prediction_payload(race, candidates, picks, now))
+    save_prediction(race.date, make_prediction_record(race, candidates, picks))
     print(f"prediction sent: {race.course} {race.rno}R {race.deadline}")
 
 
@@ -285,38 +302,46 @@ def result_payload(pred: dict[str, Any], result: dict[str, Any]) -> dict[str, An
 
 
 def update_results_and_post(args: argparse.Namespace, client: OfficialClient) -> None:
-    date_str = args.date or datetime.now(JST).strftime("%Y%m%d")
-    latest = latest_predictions_by_race(date_str)
     webhook = os.environ.get(RESULTS_WEBHOOK_ENV)
     if not webhook:
         print(f"{RESULTS_WEBHOOK_ENV} is not set")
         return
     sent = 0
-    for race_id, pred in latest.items():
-        if is_result_sent(date_str, race_id):
-            continue
-        race_data = pred["race"]
-        race = RaceSchedule(
-            date=str(race_data["date"]),
-            jcd=str(race_data["jcd"]).zfill(2),
-            rno=int(race_data["rno"]),
-            deadline=str(race_data.get("deadline") or pred.get("deadline") or "00:00"),
-            start_time=str(race_data.get("start_time") or "00:00"),
-            url=str(race_data.get("url") or ""),
-        )
-        if args.jcd and race.jcd != args.jcd.zfill(2):
-            continue
-        if args.rno and race.rno != args.rno:
-            continue
-        race_dir = result_dir_for(client, race)
-        result = parse_raceresult(race_dir / "raceresult.html")
-        if "winner" not in result:
-            continue
-        post_webhook(webhook, result_payload(pred, result))
-        mark_result_sent(date_str, race_id)
-        sent += 1
-        time.sleep(args.sleep_sec)
-    print(f"results sent: {sent}")
+    checked = 0
+    pending = 0
+    for date_str in result_update_dates(args):
+        latest = latest_predictions_by_race(date_str)
+        for race_id, pred in latest.items():
+            if is_result_sent(date_str, race_id):
+                continue
+            race_data = pred["race"]
+            race = RaceSchedule(
+                date=str(race_data["date"]),
+                jcd=str(race_data["jcd"]).zfill(2),
+                rno=int(race_data["rno"]),
+                deadline=str(race_data.get("deadline") or pred.get("deadline") or "00:00"),
+                start_time=str(race_data.get("start_time") or "00:00"),
+                url=str(race_data.get("url") or ""),
+            )
+            if args.jcd and race.jcd != args.jcd.zfill(2):
+                continue
+            if args.rno and race.rno != args.rno:
+                continue
+            checked += 1
+            try:
+                race_dir = result_dir_for(client, race)
+                result = parse_raceresult(race_dir / "raceresult.html")
+                if "winner" not in result:
+                    pending += 1
+                    continue
+                post_webhook(webhook, result_payload(pred, result))
+                mark_result_sent(date_str, race_id)
+                sent += 1
+                time.sleep(args.sleep_sec)
+            except Exception as exc:
+                pending += 1
+                print(f"result pending/skip {race.course} {race.rno}R: {exc}")
+    print(f"results checked: {checked} / sent: {sent} / pending_or_failed: {pending}")
 
 
 def run_targets(args: argparse.Namespace) -> None:
@@ -398,6 +423,7 @@ def main() -> None:
     parser.add_argument("--update-results", action="store_true")
     parser.add_argument("--predict-before-deadline-min", type=float, default=15)
     parser.add_argument("--result-after-deadline-min", type=float, default=7)
+    parser.add_argument("--result-lookback-days", type=int, default=2)
     parser.add_argument("--skip-past", action="store_true")
     parser.add_argument("--sleep-sec", type=float, default=0.5)
     parser.add_argument("--start-offset-min", type=int, default=2)
