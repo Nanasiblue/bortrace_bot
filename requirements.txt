@@ -1,7 +1,10 @@
-pandas
+﻿pandas
 numpy
 scikit-learn
-beautifulsoup4
-requests
-lxml
 lightgbm
+matplotlib
+seaborn
+requests
+beautifulsoup4
+lxml
+pytest
