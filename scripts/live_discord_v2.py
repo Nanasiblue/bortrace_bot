@@ -441,7 +441,7 @@ def main() -> None:
         default=str(DEFAULT_CANDIDATE_MODEL),
     )
     parser.add_argument("--top-candidates", type=int, default=10)
-    parser.add_argument("--top-per-race", type=int, default=3)
+    parser.add_argument("--top-per-race", type=int, default=5)
     parser.add_argument("--min-odds", type=float, default=50)
     parser.add_argument("--max-odds", type=float, default=300)
     parser.add_argument("--min-model-ev", type=float, default=0.1)
