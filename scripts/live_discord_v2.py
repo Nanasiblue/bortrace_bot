@@ -88,6 +88,7 @@ def prediction_payload(race: RaceSchedule, candidates, picks, now: datetime) -> 
     pred_order = candidates["pred_order"].iloc[0] if "pred_order" in candidates.columns and not candidates.empty else ""
     order_model = candidates.attrs.get("order_model", "position_softmax")
     winner_probs = candidates.attrs.get("winner_probs", {})
+    explanation = candidates.attrs.get("explanation", [])
     upset_prob = float(candidates["upset_prob"].iloc[0]) if not candidates.empty else 0.0
     high_prob = float(candidates["high10000_prob"].iloc[0]) if not candidates.empty else 0.0
     level, level_name = upset_level(upset_prob, high_prob)
@@ -124,6 +125,11 @@ def prediction_payload(race: RaceSchedule, candidates, picks, now: datetime) -> 
         f"順位モデル: {order_model}\n"
         f"1着確率: {prob_line}"
     )
+    fields = [
+        {"name": "読み筋", "value": "\n".join(explanation or ["説明材料なし"])[:1024], "inline": False},
+        {"name": "展示航走", "value": "\n".join(ex_lines)[:1024], "inline": False},
+        {"name": "買い目提案", "value": "\n".join(pick_lines)[:1024], "inline": False},
+    ]
     return {
         "content": f"競艇予想: {race.course} {race.rno}R / 締切 {race.deadline}",
         "embeds": [
@@ -132,10 +138,7 @@ def prediction_payload(race: RaceSchedule, candidates, picks, now: datetime) -> 
                 "url": race.url,
                 "description": description[:4000],
                 "color": 0xE67E22 if level >= 4 else 0x3498DB,
-                "fields": [
-                    {"name": "展示航走", "value": "\n".join(ex_lines)[:1024], "inline": False},
-                    {"name": "買い目提案", "value": "\n".join(pick_lines)[:1024], "inline": False},
-                ],
+                "fields": fields,
                 "footer": {"text": f"race_id={race.race_id} / カウントダウンはDiscord側で自動更新"},
                 "timestamp": datetime.now(JST).isoformat(),
             }
@@ -154,6 +157,7 @@ def make_prediction_record(race: RaceSchedule, candidates, picks) -> dict[str, A
         "pred_order": candidates.attrs.get("pred_order", ""),
         "order_model": candidates.attrs.get("order_model", "position_softmax"),
         "winner_probs": candidates.attrs.get("winner_probs", {}),
+        "explanation": candidates.attrs.get("explanation", []),
         "upset_level": {
             "level": level,
             "name": level_name,

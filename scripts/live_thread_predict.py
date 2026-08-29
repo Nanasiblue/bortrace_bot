@@ -149,6 +149,83 @@ def level_bar(level: int) -> str:
     return "■" * level + "□" * (5 - level)
 
 
+def safe_float(value: Any) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(result):
+        return None
+    return result
+
+
+def fmt_pct(value: float | None) -> str:
+    return "-" if value is None else f"{value:.1%}"
+
+
+def fmt_num(value: float | None, digits: int = 2) -> str:
+    return "-" if value is None else f"{value:.{digits}f}"
+
+
+def race_explanation(source_row: dict[str, Any], winner_probs: dict[str, float], upset_prob: float) -> list[str]:
+    if not winner_probs:
+        return []
+    probs = {int(boat): float(prob) for boat, prob in winner_probs.items()}
+    pred_winner = max(probs, key=probs.get)
+    top_challenger = max((boat for boat in range(2, 7)), key=lambda boat: probs.get(boat, 0.0))
+    boat1_prob = probs.get(1, 0.0)
+    challenger_prob = probs.get(top_challenger, 0.0)
+    margin = boat1_prob - challenger_prob
+
+    lines = [
+        f"1号艇1着 {fmt_pct(boat1_prob)} / 最有力対抗 {top_challenger}号艇 {fmt_pct(challenger_prob)} / 差 {margin:+.1%}",
+    ]
+    if pred_winner != 1:
+        lines.append(f"着順モデルは {pred_winner}号艇の1着を最上位評価")
+    elif margin < 0.08:
+        lines.append("1号艇は最上位だが、対抗との差が小さい")
+    elif boat1_prob >= 0.62 and upset_prob < 0.42:
+        lines.append("1号艇優勢で、荒れ確率も低め")
+
+    boat1_ex_rank = safe_float(source_row.get("ex_time_rank_low_1"))
+    boat1_ex = safe_float(source_row.get("ex_time_1"))
+    best_ex_boat = None
+    best_ex_time = None
+    best_ex_rank = None
+    ex_candidates = []
+    for boat in range(1, 7):
+        rank = safe_float(source_row.get(f"ex_time_rank_low_{boat}"))
+        ex_time = safe_float(source_row.get(f"ex_time_{boat}"))
+        if rank is not None and ex_time is not None:
+            ex_candidates.append((rank, ex_time, boat))
+    if ex_candidates:
+        best_ex_rank, best_ex_time, best_ex_boat = min(ex_candidates)
+        if best_ex_boat != 1 and (boat1_ex_rank is None or boat1_ex_rank >= 3):
+            lines.append(
+                f"展示は{best_ex_boat}号艇が上位（{fmt_num(best_ex_time)}）、1号艇は{fmt_num(boat1_ex)}で{fmt_num(boat1_ex_rank, 0)}位"
+            )
+
+    for metric, label, higher_is_better in [
+        ("national_win_rate", "全国勝率", True),
+        ("local_win_rate", "当地勝率", True),
+        ("motor_quinella_rate", "モーター2連率", True),
+        ("avg_st", "平均ST", False),
+    ]:
+        boat1 = safe_float(source_row.get(f"{metric}_1"))
+        challenger = safe_float(source_row.get(f"{metric}_{top_challenger}"))
+        if boat1 is None or challenger is None:
+            continue
+        if higher_is_better:
+            diff = boat1 - challenger
+            if diff <= -0.25:
+                lines.append(f"{label}は{top_challenger}号艇が優勢（1号艇 {fmt_num(boat1)} / {top_challenger}号艇 {fmt_num(challenger)}）")
+        else:
+            diff = boat1 - challenger
+            if diff >= 0.03:
+                lines.append(f"{label}は{top_challenger}号艇が先行気味（1号艇 {fmt_num(boat1)} / {top_challenger}号艇 {fmt_num(challenger)}）")
+    return lines[:4]
+
+
 def parse_hhmm(text: str) -> str | None:
     match = re.search(r"(\d{1,2}):(\d{2})", text)
     if not match:
@@ -487,6 +564,11 @@ def score_candidates(
     sorted_candidates.attrs["order_model"] = order_model
     sorted_candidates.attrs["winner_probs"] = {str(i + 1): float(prob) for i, prob in enumerate(probs["pos1"])}
     sorted_candidates.attrs["source_row"] = row.iloc[0].to_dict()
+    sorted_candidates.attrs["explanation"] = race_explanation(
+        sorted_candidates.attrs["source_row"],
+        sorted_candidates.attrs["winner_probs"],
+        binary.get("upset", 0.0),
+    )
     return sorted_candidates
 
 
@@ -535,6 +617,7 @@ def render_prediction(race: RaceSchedule, candidates: pd.DataFrame, picks: pd.Da
     high_prob = float(candidates["high10000_prob"].iloc[0]) if "high10000_prob" in candidates.columns and not candidates.empty else 0.0
     level, level_name = upset_level(upset_prob, high_prob)
     source_row = candidates.attrs.get("source_row", {})
+    explanation = candidates.attrs.get("explanation", [])
     lines = [
         f"## {race.course} {race.rno}R",
         f"- 締切: {race.deadline}（あと {format_countdown(race.deadline_dt, now)}）",
@@ -544,10 +627,18 @@ def render_prediction(race: RaceSchedule, candidates: pd.DataFrame, picks: pd.Da
         f"- 順位モデル: {order_model}",
         f"- 1着確率: {winner_line}",
         "",
+        "読み筋:",
+    ]
+    if explanation:
+        for line in explanation:
+            lines.append(f"- {line}")
+    else:
+        lines.append("- 説明材料なし")
+    lines.extend([
         "展示航走:",
         "| 艇 | 展示 | 展示順位 | 体重 | チルト | ST展示 |",
         "|---:|---:|---:|---:|---:|---:|",
-    ]
+    ])
     for boat in range(1, 7):
         lines.append(
             f"| {boat} | {source_row.get(f'ex_time_{boat}', np.nan):.2f} | "
@@ -634,6 +725,7 @@ def predict_and_save_race(
         "pred_order": candidates.attrs.get("pred_order", ""),
         "order_model": candidates.attrs.get("order_model", "position_softmax"),
             "winner_probs": candidates.attrs.get("winner_probs", {}),
+            "explanation": candidates.attrs.get("explanation", []),
             "upset_level": {
                 "level": level,
                 "name": level_name,
