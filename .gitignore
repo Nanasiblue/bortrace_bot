@@ -1,0 +1,12 @@
+﻿__pycache__/
+*.py[cod]
+.venv/
+.deps/
+.env
+outputs/*
+!outputs/.gitkeep
+work/*
+!work/.gitkeep
+worker_data/
+*.pkl
+*.log

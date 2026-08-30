@@ -1,0 +1,10 @@
+﻿pandas
+numpy
+scikit-learn
+lightgbm
+matplotlib
+seaborn
+requests
+beautifulsoup4
+lxml
+pytest

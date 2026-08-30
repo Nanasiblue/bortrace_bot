@@ -1,0 +1,101 @@
+{
+  "notes": [
+    "CV search used 2023-2025 fold models and head/tail 3000-race samples per year.",
+    "No strategy found with positive ROI across all sample/year segments.",
+    "Use aggressive_candidate only for paper trading or very small stakes until 2026 validation is available."
+  ],
+  "stable_monitor": {
+    "purpose": "低リスク確認用。6区間すべてで最低回収率50%以上だが、全体回収率は約74.7%で実買い非推奨。",
+    "prob_scale": 0.2,
+    "min_ev": -0.2,
+    "top_rank": 10,
+    "min_odds": 50,
+    "max_odds": 800,
+    "min_upset": 0.25,
+    "max_upset": 0.6,
+    "min_high10000": 0.12,
+    "unit_stake_yen": 100,
+    "observed_roi_head_tail_3000": 0.7468
+  },
+  "aggressive_candidate": {
+    "purpose": "短期の紙検証・通知候補用。head/tail×年の6区間で0回収なし。まだ件数は少ないので実買いは非推奨。",
+    "prob_scale": 0.3,
+    "min_ev": -0.1,
+    "top_rank": 3,
+    "min_odds": 50,
+    "max_odds": 150,
+    "min_upset": 0.3,
+    "max_upset": 0.7,
+    "min_high10000": 0.06,
+    "unit_stake_yen": 100,
+    "max_race_stake_yen": 100,
+    "observed_roi_head_tail_3000": 1.2556,
+    "observed_bets_head_tail_3000": 540,
+    "observed_min_segment_roi": 0.6468
+  },
+  "balanced_candidate": {
+    "purpose": "候補B。件数を少し増やしつつ、6区間で0回収なし。Aよりやや保守的な監視候補。",
+    "prob_scale": 0.2,
+    "min_ev": -0.4,
+    "top_rank": 3,
+    "min_odds": 5,
+    "max_odds": 200,
+    "min_upset": 0.25,
+    "max_upset": 0.55,
+    "min_high10000": 0.15,
+    "unit_stake_yen": 100,
+    "max_race_stake_yen": 100,
+    "observed_roi_head_tail_3000": 1.2389,
+    "observed_bets_head_tail_3000": 653,
+    "observed_min_segment_roi": 0.6375
+  },
+  "wide_monitor": {
+    "purpose": "候補C。件数多めの監視用。ROIは候補A/Bより低いが、傾向確認に使う。",
+    "prob_scale": 0.18,
+    "min_ev": -0.4,
+    "top_rank": 5,
+    "min_odds": 50,
+    "max_odds": 300,
+    "min_upset": 0.2,
+    "max_upset": 0.45,
+    "min_high10000": 0.0,
+    "unit_stake_yen": 100,
+    "max_race_stake_yen": 300,
+    "observed_roi_head_tail_3000": 1.1623,
+    "observed_bets_head_tail_3000": 1862,
+    "observed_min_segment_roi": 0.5466
+  },
+  "do_not_use_yet": {
+    "kelly_staking": true,
+    "reason": "確率校正がまだ不十分で、Kellyは賭け金を過大化しやすい。まず固定100円の紙検証を優先。"
+  },
+  "ml_candidate_lightgbm": {
+    "purpose": "追加ライブラリ導入後の本命候補。3連単候補ごとの買い目選定モデル。head/tail両方向で比較的強い。",
+    "library": "lightgbm",
+    "features": [
+      "raw_prob",
+      "odds",
+      "log_odds",
+      "implied_prob",
+      "raw_ev",
+      "scaled_ev",
+      "upset_prob",
+      "high10000_prob",
+      "candidate_rank",
+      "boat_combination_one_hot"
+    ],
+    "recommended_score": "model_ev",
+    "initial_rules": {
+      "top_per_race": 2,
+      "min_score_quantile": 0.98,
+      "min_odds": 50,
+      "max_odds": 300,
+      "stake": "fixed_100yen_paper_trade"
+    },
+    "observed": {
+      "head_to_tail_best_roi": 1.4987,
+      "tail_to_head_best_roi": 1.9141,
+      "note": "サンプルhead/tail検証。2026で未検証なので実買いはまだ不可。"
+    }
+  }
+}
