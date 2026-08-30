@@ -1,4 +1,4 @@
-﻿__pycache__/
+__pycache__/
 *.py[cod]
 .venv/
 .deps/
@@ -10,3 +10,4 @@ work/*
 worker_data/
 *.pkl
 *.log
+notified_races.log

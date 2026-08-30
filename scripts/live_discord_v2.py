@@ -19,7 +19,6 @@ from live_thread_predict import (
     OfficialClient,
     RaceSchedule,
     build_live_row,
-    format_countdown,
     level_bar,
     load_candidate_model,
     load_position_models,
@@ -34,6 +33,7 @@ from live_thread_predict import (
 
 PREDICTION_WEBHOOK_ENV = "DISCORD_PREDICTION_WEBHOOK_URL"
 RESULTS_WEBHOOK_ENV = "DISCORD_RESULTS_WEBHOOK_URL"
+RESULT_SENT_DIR = OUTPUT_DIR / "live_thread_results"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OFFICIAL_MODELS_DIR = (
     OUTPUT_DIR / "official_models_final_2021_2025"
@@ -47,17 +47,26 @@ DEFAULT_CANDIDATE_MODEL = (
 )
 
 
-def post_webhook(webhook_url: str, payload: dict[str, Any]) -> None:
+def post_webhook(webhook_url: str, payload: dict[str, Any], retries: int = 3) -> None:
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(
-        webhook_url,
-        data=data,
-        headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=20) as res:
-        if res.status >= 400:
-            raise RuntimeError(f"Discord webhook failed: HTTP {res.status}")
+    last_error: Exception | None = None
+    for attempt in range(1, retries + 1):
+        req = urllib.request.Request(
+            webhook_url,
+            data=data,
+            headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=20) as res:
+                if res.status < 400:
+                    return
+                raise RuntimeError(f"Discord webhook failed: HTTP {res.status}")
+        except Exception as exc:
+            last_error = exc
+            if attempt < retries:
+                time.sleep(2 * attempt)
+    raise RuntimeError(f"Discord webhook failed after {retries} attempts: {last_error}")
 
 
 def fmt(value: Any, digits: int = 2) -> str:
@@ -67,6 +76,10 @@ def fmt(value: Any, digits: int = 2) -> str:
         return f"{float(value):.{digits}f}"
     except Exception:
         return "-"
+
+
+def discord_time(target: datetime, style: str = "R") -> str:
+    return f"<t:{int(target.timestamp())}:{style}>"
 
 
 def prediction_payload(race: RaceSchedule, candidates, picks, now: datetime) -> dict[str, Any]:
@@ -93,17 +106,17 @@ def prediction_payload(race: RaceSchedule, candidates, picks, now: datetime) -> 
         pick_lines = []
         for _, row in picks.iterrows():
             stake = int(row.get("stake_yen", 0))
-            stake_text = f"{stake:,}円" if stake > 0 else "紙検証"
+            stake_text = f"購入候補 {stake:,}円" if stake > 0 else "参考候補（購入なし）"
             pick_lines.append(
-                f"{row['combination']} / odds {row['odds']:.1f} / scoreEV {row['model_ev']:.2f} "
+                f"{row['combination']} / オッズ {row['odds']:.1f} / 期待値スコア {row['model_ev']:.2f} "
                 f"/ Kelly {row['used_kelly']:.3%} / {stake_text}"
             )
 
     prob_line = " / ".join(f"{boat}号艇 {prob:.1%}" for boat, prob in sorted(winner_probs.items()))
     description = (
-        f"対象レース締切: {race.deadline}（あと {format_countdown(race.deadline_dt, now)}）\n"
+        f"締切: {race.deadline}（{discord_time(race.deadline_dt)} / {discord_time(race.deadline_dt, 't')}）\n"
         f"発走目安: {race.start_time}\n"
-        f"荒れ判定: {level_bar(level)} Lv.{level} {level_name} / イン飛び {upset_prob:.1%} / 万舟 {high_prob:.1%}\n"
+        f"荒れやすさ: {level_bar(level)} Lv.{level} {level_name} / 1号艇以外の1着 {upset_prob:.1%} / 万舟級 {high_prob:.1%}\n"
         f"AI予想順位: {pred_order}\n"
         f"1着確率: {prob_line}"
     )
@@ -117,9 +130,9 @@ def prediction_payload(race: RaceSchedule, candidates, picks, now: datetime) -> 
                 "color": 0xE67E22 if level >= 4 else 0x3498DB,
                 "fields": [
                     {"name": "展示航走", "value": "\n".join(ex_lines)[:1024], "inline": False},
-                    {"name": "AI推奨買い目", "value": "\n".join(pick_lines)[:1024], "inline": False},
+                    {"name": "買い目提案", "value": "\n".join(pick_lines)[:1024], "inline": False},
                 ],
-                "footer": {"text": f"race_id={race.race_id}"},
+                "footer": {"text": f"race_id={race.race_id} / カウントダウンはDiscord側で自動更新"},
                 "timestamp": datetime.now(JST).isoformat(),
             }
         ],
@@ -167,6 +180,40 @@ def save_prediction(date_str: str, record: dict[str, Any]) -> None:
         f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
 
 
+def latest_predictions_by_race(date_str: str) -> dict[str, dict[str, Any]]:
+    latest: dict[str, dict[str, Any]] = {}
+    for pred in load_thread_predictions(date_str):
+        race_data = pred.get("race", {})
+        race_id = f"{race_data.get('date')}_{str(race_data.get('jcd')).zfill(2)}_{race_data.get('rno')}"
+        latest[race_id] = pred
+    return latest
+
+
+def result_update_dates(args: argparse.Namespace) -> list[str]:
+    base = datetime.strptime(args.date, "%Y%m%d") if args.date else datetime.now(JST).replace(tzinfo=None)
+    return [
+        (base - timedelta(days=offset)).strftime("%Y%m%d")
+        for offset in range(max(0, args.result_lookback_days) + 1)
+    ]
+
+
+def result_sent_path(date_str: str) -> Path:
+    RESULT_SENT_DIR.mkdir(parents=True, exist_ok=True)
+    return RESULT_SENT_DIR / f"sent_results_{date_str}.log"
+
+
+def is_result_sent(date_str: str, race_id: str) -> bool:
+    path = result_sent_path(date_str)
+    if not path.exists():
+        return False
+    return race_id in set(path.read_text(encoding="utf-8").splitlines())
+
+
+def mark_result_sent(date_str: str, race_id: str) -> None:
+    with result_sent_path(date_str).open("a", encoding="utf-8") as f:
+        f.write(race_id + "\n")
+
+
 def predict_and_post(args: argparse.Namespace, client: OfficialClient, race: RaceSchedule, models, candidate_model) -> None:
     now = datetime.now(JST)
     race_dir = client.fetch_race_pages(race)
@@ -193,12 +240,12 @@ def predict_and_post(args: argparse.Namespace, client: OfficialClient, race: Rac
         min_model_ev=args.min_model_ev,
         top_per_race=args.top_per_race,
     )
-    save_prediction(race.date, make_prediction_record(race, candidates, picks))
     webhook = os.environ.get(PREDICTION_WEBHOOK_ENV) or os.environ.get("DISCORD_WEBHOOK_URL")
     if not webhook:
         print(f"{PREDICTION_WEBHOOK_ENV} is not set")
         return
     post_webhook(webhook, prediction_payload(race, candidates, picks, now))
+    save_prediction(race.date, make_prediction_record(race, candidates, picks))
     print(f"prediction sent: {race.course} {race.rno}R {race.deadline}")
 
 
@@ -227,21 +274,21 @@ def result_payload(pred: dict[str, Any], result: dict[str, Any]) -> dict[str, An
         pick_status = "的中" if hit_picks else "外れ"
         for pick in pred["picks"][:5]:
             mark = "的中 " if str(pick.get("combination")) == trifecta else ""
-            pick_lines.append(f"{mark}{pick.get('combination')} / odds {float(pick.get('odds', 0)):.1f}")
+            pick_lines.append(f"{mark}{pick.get('combination')} / オッズ {float(pick.get('odds', 0)):.1f}")
 
     description = (
-        f"対象レース締切: {pred.get('deadline', race_data.get('deadline', ''))}\n"
+        f"締切: {pred.get('deadline', race_data.get('deadline', ''))}\n"
         f"結果: {actual_order}\n"
         f"3連単: {trifecta} / 払戻 {payout:,}円\n"
         f"AI予想順位: {pred_order}\n"
         f"順位判定: 1着 {'的中' if winner_hit else '外れ'} / 3連単順序 {'的中' if top3_exact else '外れ'}\n"
-        f"荒れ判定: 予想Lv.{level.get('level')} {level.get('name')} / 実際 {'荒れ' if actual_upset else 'イン逃げ'} "
+        f"荒れやすさ: 予想Lv.{level.get('level')} {level.get('name')} / 実際 {'1号艇以外の1着' if actual_upset else '1号艇の1着'} "
         f"/ {'一致' if pred_upset == actual_upset else '不一致'}\n"
-        f"買い目: {pick_status}"
+        f"買い目判定: {pick_status}"
     )
     fields = []
     if pick_lines:
-        fields.append({"name": "AI推奨買い目", "value": "\n".join(pick_lines)[:1024], "inline": False})
+        fields.append({"name": "買い目提案", "value": "\n".join(pick_lines)[:1024], "inline": False})
     return {
         "content": f"競艇成績: {course} {rno}R / {pick_status}",
         "embeds": [
@@ -258,40 +305,46 @@ def result_payload(pred: dict[str, Any], result: dict[str, Any]) -> dict[str, An
 
 
 def update_results_and_post(args: argparse.Namespace, client: OfficialClient) -> None:
-    date_str = args.date or datetime.now(JST).strftime("%Y%m%d")
-    preds = load_thread_predictions(date_str)
-    latest: dict[str, dict[str, Any]] = {}
-    for pred in preds:
-        race_data = pred.get("race", {})
-        race_id = f"{race_data.get('date')}_{str(race_data.get('jcd')).zfill(2)}_{race_data.get('rno')}"
-        latest[race_id] = pred
     webhook = os.environ.get(RESULTS_WEBHOOK_ENV)
     if not webhook:
         print(f"{RESULTS_WEBHOOK_ENV} is not set")
         return
     sent = 0
-    for pred in latest.values():
-        race_data = pred["race"]
-        race = RaceSchedule(
-            date=str(race_data["date"]),
-            jcd=str(race_data["jcd"]).zfill(2),
-            rno=int(race_data["rno"]),
-            deadline=str(race_data.get("deadline") or pred.get("deadline") or "00:00"),
-            start_time=str(race_data.get("start_time") or "00:00"),
-            url=str(race_data.get("url") or ""),
-        )
-        if args.jcd and race.jcd != args.jcd.zfill(2):
-            continue
-        if args.rno and race.rno != args.rno:
-            continue
-        race_dir = result_dir_for(client, race)
-        result = parse_raceresult(race_dir / "raceresult.html")
-        if "winner" not in result:
-            continue
-        post_webhook(webhook, result_payload(pred, result))
-        sent += 1
-        time.sleep(args.sleep_sec)
-    print(f"results sent: {sent}")
+    checked = 0
+    pending = 0
+    for date_str in result_update_dates(args):
+        latest = latest_predictions_by_race(date_str)
+        for race_id, pred in latest.items():
+            if is_result_sent(date_str, race_id):
+                continue
+            race_data = pred["race"]
+            race = RaceSchedule(
+                date=str(race_data["date"]),
+                jcd=str(race_data["jcd"]).zfill(2),
+                rno=int(race_data["rno"]),
+                deadline=str(race_data.get("deadline") or pred.get("deadline") or "00:00"),
+                start_time=str(race_data.get("start_time") or "00:00"),
+                url=str(race_data.get("url") or ""),
+            )
+            if args.jcd and race.jcd != args.jcd.zfill(2):
+                continue
+            if args.rno and race.rno != args.rno:
+                continue
+            checked += 1
+            try:
+                race_dir = result_dir_for(client, race)
+                result = parse_raceresult(race_dir / "raceresult.html")
+                if "winner" not in result:
+                    pending += 1
+                    continue
+                post_webhook(webhook, result_payload(pred, result))
+                mark_result_sent(date_str, race_id)
+                sent += 1
+                time.sleep(args.sleep_sec)
+            except Exception as exc:
+                pending += 1
+                print(f"result pending/skip {race.course} {race.rno}R: {exc}")
+    print(f"results checked: {checked} / sent: {sent} / pending_or_failed: {pending}")
 
 
 def run_targets(args: argparse.Namespace) -> None:
@@ -309,8 +362,11 @@ def run_targets(args: argparse.Namespace) -> None:
     now = datetime.now(JST)
     models = load_position_models(Path(args.official_models_dir))
     candidate_model = load_candidate_model(Path(args.candidate_model))
+    already_predicted = set(latest_predictions_by_race(date_str))
     targets = []
     for race in races:
+        if race.race_id in already_predicted:
+            continue
         minutes = (race.deadline_dt - now).total_seconds() / 60.0
         if args.rno or args.force:
             targets.append(race)
@@ -370,6 +426,7 @@ def main() -> None:
     parser.add_argument("--update-results", action="store_true")
     parser.add_argument("--predict-before-deadline-min", type=float, default=15)
     parser.add_argument("--result-after-deadline-min", type=float, default=7)
+    parser.add_argument("--result-lookback-days", type=int, default=2)
     parser.add_argument("--skip-past", action="store_true")
     parser.add_argument("--sleep-sec", type=float, default=0.5)
     parser.add_argument("--start-offset-min", type=int, default=2)

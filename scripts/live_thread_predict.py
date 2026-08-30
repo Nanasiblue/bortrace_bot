@@ -484,9 +484,9 @@ def render_prediction(race: RaceSchedule, candidates: pd.DataFrame, picks: pd.Da
     source_row = candidates.attrs.get("source_row", {})
     lines = [
         f"## {race.course} {race.rno}R",
-        f"- 対象レース締切: {race.deadline}（あと {format_countdown(race.deadline_dt, now)}）",
+        f"- 締切: {race.deadline}（あと {format_countdown(race.deadline_dt, now)}）",
         f"- 発走目安: {race.start_time}",
-        f"- 荒れ判定: {level_bar(level)} Lv.{level} {level_name} / イン飛び {upset_prob:.1%} / 万舟 {high_prob:.1%}",
+        f"- 荒れやすさ: {level_bar(level)} Lv.{level} {level_name} / 1号艇以外の1着 {upset_prob:.1%} / 万舟級 {high_prob:.1%}",
         f"- 予想順位: {pred_order}",
         f"- 1着確率: {winner_line}",
         "",
@@ -511,17 +511,17 @@ def render_prediction(race: RaceSchedule, candidates: pd.DataFrame, picks: pd.Da
         lines.append("買い目提案:")
         for _, row in picks.iterrows():
             stake = int(row["stake_yen"])
-            stake_text = f"{stake:,}円" if stake > 0 else "紙検証"
+            stake_text = f"購入候補 {stake:,}円" if stake > 0 else "参考候補（購入なし）"
             lines.append(
-                f"- {row['combination']} / オッズ {row['odds']:.1f} / scoreEV {row['model_ev']:.2f} "
+                f"- {row['combination']} / オッズ {row['odds']:.1f} / 期待値スコア {row['model_ev']:.2f} "
                 f"/ rawEV {row['raw_ev']:.2f} / Kelly {row['used_kelly']:.3%} / {stake_text}"
             )
         lines.append("")
         lines.append("参考上位:")
     for _, row in candidates.head(5).iterrows():
         lines.append(
-            f"- {row['combination']} odds {row['odds']:.1f}, scoreEV {row['model_ev']:.2f}, "
-            f"rawProb {row['raw_prob']:.3%}, KellyProb {row['kelly_prob']:.3%}"
+            f"- {row['combination']} / オッズ {row['odds']:.1f} / 期待値スコア {row['model_ev']:.2f} / "
+            f"推定確率 {row['raw_prob']:.3%} / Kelly用確率 {row['kelly_prob']:.3%}"
         )
     return "\n".join(lines)
 
@@ -648,7 +648,7 @@ def render_result_update(pred: dict[str, Any], result: dict[str, Any]) -> str:
     pred_upset = int(pred_upset_level.get("level", 0)) >= 4
     lines = [
         f"## 結果更新: {course} {rno}R",
-        f"- 対象レース締切: {deadline}",
+        f"- 締切: {deadline}",
         f"- 結果: {actual_order}",
         f"- 3連単: {trifecta} / 払戻 {int(payout or 0):,}円",
         f"- AI予想順位: {pred_order}",
