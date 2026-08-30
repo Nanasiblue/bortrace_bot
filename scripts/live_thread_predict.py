@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import pickle
 import re
@@ -54,6 +55,7 @@ DEFAULT_CANDIDATE_MODEL = (
 DEFAULT_RANKING_MODEL = PROJECT_ROOT / "models" / "ranking_order_kibetsu" / "ranking_model_selected.pkl"
 DEFAULT_KIBETSU_DIR = PROJECT_ROOT / "models" / "kibetsu"
 DEFAULT_UPSET_MODEL = PROJECT_ROOT / "models" / "upset_model" / "upset_model.pkl"
+DEFAULT_ORDER_MODEL = PROJECT_ROOT / "models" / "order_model" / "order_lightgbm_model.pkl.gz"
 COURSE_NAMES = {
     "01": "桐生",
     "02": "戸田",
@@ -427,12 +429,26 @@ def load_ranking_model(path: str = str(DEFAULT_RANKING_MODEL)) -> RaceRankingMod
 
 
 def load_pickle_model(path: Path) -> Any:
-    with path.open("rb") as f:
+    opener = gzip.open if path.suffix == ".gz" else Path.open
+    with opener(path, "rb") as f:
         return pickle.load(f)
 
 
 def candidate_model_is_calibrated(candidate_model: Any) -> bool:
     return bool(getattr(candidate_model, "is_calibrated_probability_model", False))
+
+
+def predict_position_probs(
+    model_frame: pd.DataFrame,
+    pos_models: dict[str, SoftmaxRegression],
+    order_model: Any | None,
+) -> dict[str, np.ndarray]:
+    if order_model is not None and hasattr(order_model, "predict_position_probs"):
+        return order_model.predict_position_probs(model_frame)
+    return {
+        name: model.predict_proba(ensure_model_features(model_frame, model.feature_columns))
+        for name, model in pos_models.items()
+    }
 
 
 def build_live_row(race: RaceSchedule, race_dir: Path) -> pd.DataFrame:
@@ -470,6 +486,7 @@ def score_candidates(
     binary_models: dict[str, BinaryLogisticRegression],
     candidate_model: Any,
     upset_model: Any | None = None,
+    order_model: Any | None = None,
     *,
     top_candidates: int,
     prob_scale: float,
@@ -479,10 +496,7 @@ def score_candidates(
     base_stake: int,
 ) -> pd.DataFrame:
     model_frame = row.copy()
-    probs = {
-        name: model.predict_proba(ensure_model_features(model_frame, model.feature_columns))[0]
-        for name, model in pos_models.items()
-    }
+    probs = {name: values[0] for name, values in predict_position_probs(model_frame, pos_models, order_model).items()}
     order = greedy_order_from_position_probs({name: values.reshape(1, -1) for name, values in probs.items()})[0] + 1
     order_model = "position_softmax"
     ranking_model = load_ranking_model()
@@ -688,6 +702,7 @@ def predict_and_save_race(
     binary_models: dict[str, BinaryLogisticRegression],
     candidate_model: Any,
     upset_model: Any | None = None,
+    order_model: Any | None = None,
 ) -> str:
     race_dir = client.fetch_race_pages(race)
     row = build_live_row(race, race_dir)
@@ -699,6 +714,7 @@ def predict_and_save_race(
         binary_models,
         candidate_model,
         upset_model,
+        order_model,
         top_candidates=args.top_candidates,
         prob_scale=args.prob_scale,
         kelly_scale=args.kelly_scale,
@@ -837,6 +853,8 @@ def run_once(args: argparse.Namespace) -> None:
     candidate_model = load_candidate_model(Path(args.candidate_model))
     upset_model_path = Path(args.upset_model) if args.upset_model else None
     upset_model = load_pickle_model(upset_model_path) if upset_model_path and upset_model_path.exists() else None
+    order_model_path = Path(args.order_model) if args.order_model else None
+    order_model = load_pickle_model(order_model_path) if order_model_path and order_model_path.exists() else None
     targets = []
     for race in races:
         minutes_to_deadline = (race.deadline_dt - now).total_seconds() / 60.0
@@ -856,7 +874,7 @@ def run_once(args: argparse.Namespace) -> None:
     for race in targets:
         try:
             rendered.append(
-                predict_and_save_race(args, date_str, now, client, race, pos_models, binary_models, candidate_model, upset_model)
+                predict_and_save_race(args, date_str, now, client, race, pos_models, binary_models, candidate_model, upset_model, order_model)
             )
         except Exception as exc:
             rendered.append(f"## {race.course} {race.rno}R\n- skip: {exc}")
@@ -1021,6 +1039,8 @@ def run_scheduled(args: argparse.Namespace) -> None:
     candidate_model = load_candidate_model(Path(args.candidate_model))
     upset_model_path = Path(args.upset_model) if args.upset_model else None
     upset_model = load_pickle_model(upset_model_path) if upset_model_path and upset_model_path.exists() else None
+    order_model_path = Path(args.order_model) if args.order_model else None
+    order_model = load_pickle_model(order_model_path) if order_model_path and order_model_path.exists() else None
     events: list[tuple[datetime, str, RaceSchedule]] = []
     for race in races:
         events.append((race.deadline_dt - timedelta(minutes=args.predict_before_deadline_min), "predict", race))
@@ -1044,7 +1064,16 @@ def run_scheduled(args: argparse.Namespace) -> None:
             try:
                 print(
                     predict_and_save_race(
-                        args, date_str, datetime.now(JST), client, race, pos_models, binary_models, candidate_model, upset_model
+                        args,
+                        date_str,
+                        datetime.now(JST),
+                        client,
+                        race,
+                        pos_models,
+                        binary_models,
+                        candidate_model,
+                        upset_model,
+                        order_model,
                     ),
                     flush=True,
                 )
@@ -1087,6 +1116,7 @@ def main() -> None:
         default=str(DEFAULT_CANDIDATE_MODEL),
     )
     parser.add_argument("--upset-model", default=str(DEFAULT_UPSET_MODEL))
+    parser.add_argument("--order-model", default=str(DEFAULT_ORDER_MODEL))
     parser.add_argument("--top-candidates", type=int, default=10)
     parser.add_argument("--top-per-race", type=int, default=5)
     parser.add_argument("--min-odds", type=float, default=50)

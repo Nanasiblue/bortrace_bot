@@ -12,3 +12,4 @@ worker_data/
 !models/ranking_order_kibetsu/ranking_model_selected.pkl
 *.log
 notified_races.log
+models/order_model/*.pkl

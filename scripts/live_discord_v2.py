@@ -47,6 +47,7 @@ DEFAULT_CANDIDATE_MODEL = (
     else PROJECT_ROOT / "models" / "candidate_lightgbm" / "lightgbm.pkl"
 )
 DEFAULT_UPSET_MODEL = PROJECT_ROOT / "models" / "upset_model" / "upset_model.pkl"
+DEFAULT_ORDER_MODEL = PROJECT_ROOT / "models" / "order_model" / "order_lightgbm_model.pkl.gz"
 
 
 def post_webhook(webhook_url: str, payload: dict[str, Any], retries: int = 3) -> None:
@@ -223,7 +224,7 @@ def mark_result_sent(date_str: str, race_id: str) -> None:
         f.write(race_id + "\n")
 
 
-def predict_and_post(args: argparse.Namespace, client: OfficialClient, race: RaceSchedule, models, candidate_model, upset_model) -> None:
+def predict_and_post(args: argparse.Namespace, client: OfficialClient, race: RaceSchedule, models, candidate_model, upset_model, order_model) -> None:
     now = datetime.now(JST)
     race_dir = client.fetch_race_pages(race)
     row = build_live_row(race, race_dir)
@@ -236,6 +237,7 @@ def predict_and_post(args: argparse.Namespace, client: OfficialClient, race: Rac
         binary_models,
         candidate_model,
         upset_model,
+        order_model,
         top_candidates=args.top_candidates,
         prob_scale=args.prob_scale,
         kelly_scale=args.kelly_scale,
@@ -374,6 +376,8 @@ def run_targets(args: argparse.Namespace) -> None:
     candidate_model = load_candidate_model(Path(args.candidate_model))
     upset_model_path = Path(args.upset_model) if args.upset_model else None
     upset_model = load_pickle_model(upset_model_path) if upset_model_path and upset_model_path.exists() else None
+    order_model_path = Path(args.order_model) if args.order_model else None
+    order_model = load_pickle_model(order_model_path) if order_model_path and order_model_path.exists() else None
     already_predicted = set(latest_predictions_by_race(date_str))
     targets = []
     for race in races:
@@ -386,7 +390,7 @@ def run_targets(args: argparse.Namespace) -> None:
             targets.append(race)
     for race in targets:
         try:
-            predict_and_post(args, client, race, models, candidate_model, upset_model)
+            predict_and_post(args, client, race, models, candidate_model, upset_model, order_model)
         except Exception as exc:
             print(f"skip {race.course} {race.rno}R: {exc}")
 
@@ -408,6 +412,8 @@ def run_scheduled(args: argparse.Namespace) -> None:
     candidate_model = load_candidate_model(Path(args.candidate_model))
     upset_model_path = Path(args.upset_model) if args.upset_model else None
     upset_model = load_pickle_model(upset_model_path) if upset_model_path and upset_model_path.exists() else None
+    order_model_path = Path(args.order_model) if args.order_model else None
+    order_model = load_pickle_model(order_model_path) if order_model_path and order_model_path.exists() else None
     for event_at, kind, race in events:
         now = datetime.now(JST)
         if args.skip_past and event_at < now:
@@ -418,7 +424,7 @@ def run_scheduled(args: argparse.Namespace) -> None:
             time.sleep(wait_sec)
         try:
             if kind == "predict":
-                predict_and_post(args, client, race, models, candidate_model, upset_model)
+                predict_and_post(args, client, race, models, candidate_model, upset_model, order_model)
             else:
                 update_args = argparse.Namespace(**vars(args))
                 update_args.jcd = race.jcd
@@ -452,6 +458,7 @@ def main() -> None:
         default=str(DEFAULT_CANDIDATE_MODEL),
     )
     parser.add_argument("--upset-model", default=str(DEFAULT_UPSET_MODEL))
+    parser.add_argument("--order-model", default=str(DEFAULT_ORDER_MODEL))
     parser.add_argument("--top-candidates", type=int, default=10)
     parser.add_argument("--top-per-race", type=int, default=5)
     parser.add_argument("--min-odds", type=float, default=50)
