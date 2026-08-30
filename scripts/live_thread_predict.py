@@ -9,6 +9,7 @@ import time
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,8 @@ except ModuleNotFoundError:
 
 from bortrace.baseline_model import BinaryLogisticRegression, SoftmaxRegression
 from bortrace.official_parser import add_engineered_features, parse_beforeinfo, parse_raceresult, parse_racelist
+from bortrace.kibetsu import enrich_race
+from bortrace.ranking_order_model import RaceRankingModel
 from bortrace.paths import OUTPUT_DIR, WORK_DIR
 from build_odds3t_dataset import parse_odds3t
 from predict_trifecta_ev import combo_probabilities, kelly_fraction
@@ -48,6 +51,8 @@ DEFAULT_CANDIDATE_MODEL = (
     if (OUTPUT_DIR / "candidate_lightgbm_2023_2025_valid_202607" / "lightgbm.pkl").exists()
     else PROJECT_ROOT / "models" / "candidate_lightgbm" / "lightgbm.pkl"
 )
+DEFAULT_RANKING_MODEL = PROJECT_ROOT / "models" / "ranking_order_kibetsu" / "ranking_model_selected.pkl"
+DEFAULT_KIBETSU_DIR = PROJECT_ROOT / "models" / "kibetsu"
 COURSE_NAMES = {
     "01": "桐生",
     "02": "戸田",
@@ -331,6 +336,18 @@ def load_candidate_model(path: Path) -> Any:
         return pickle.load(f)
 
 
+@lru_cache(maxsize=1)
+def load_ranking_model(path: str = str(DEFAULT_RANKING_MODEL)) -> RaceRankingModel | None:
+    model_path = Path(path)
+    if not model_path.exists():
+        return None
+    with model_path.open("rb") as f:
+        model = pickle.load(f)
+    if not isinstance(model, RaceRankingModel):
+        raise TypeError(f"Unexpected ranking model: {type(model)!r}")
+    return model
+
+
 def build_live_row(race: RaceSchedule, race_dir: Path) -> pd.DataFrame:
     row: dict[str, Any] = {
         "date": int(race.date),
@@ -339,9 +356,10 @@ def build_live_row(race: RaceSchedule, race_dir: Path) -> pd.DataFrame:
         "jcd": int(race.jcd),
         "rno": race.rno,
     }
-    row.update(parse_racelist(race_dir / "racelist.html"))
+    row.update(parse_racelist(race_dir / "racelist.html", rno=race.rno))
     before = parse_beforeinfo(race_dir / "beforeinfo.html")
     row.update(before)
+    enrich_race(row, race.date, root=str(DEFAULT_KIBETSU_DIR))
     missing = [f"ex_time_{boat}" for boat in range(1, 7) if row.get(f"ex_time_{boat}") is None]
     if missing:
         raise RuntimeError(f"展示航走データ未取得: {', '.join(missing)}")
@@ -378,6 +396,14 @@ def score_candidates(
         for name, model in pos_models.items()
     }
     order = greedy_order_from_position_probs({name: values.reshape(1, -1) for name, values in probs.items()})[0] + 1
+    order_model = "position_softmax"
+    ranking_model = load_ranking_model()
+    if ranking_model is not None:
+        try:
+            order = ranking_model.predict_order(model_frame)[0]
+            order_model = ranking_model.label
+        except Exception as exc:
+            print(f"ranking model fallback: {exc}", flush=True)
     pred_order = "-".join(str(int(boat)) for boat in order)
     binary = {
         name: float(model.predict_proba(ensure_model_features(model_frame, model.feature_columns))[0])
@@ -434,6 +460,7 @@ def score_candidates(
     candidates["model_ev"] = candidates["model_prob"] * candidates["odds"] - 1.0
     sorted_candidates = candidates.sort_values(["model_ev", "raw_ev"], ascending=[False, False]).reset_index(drop=True)
     sorted_candidates.attrs["pred_order"] = pred_order
+    sorted_candidates.attrs["order_model"] = order_model
     sorted_candidates.attrs["winner_probs"] = {str(i + 1): float(prob) for i, prob in enumerate(probs["pos1"])}
     sorted_candidates.attrs["source_row"] = row.iloc[0].to_dict()
     return sorted_candidates
@@ -476,6 +503,7 @@ def render_schedule(races: list[RaceSchedule], now: datetime) -> str:
 
 def render_prediction(race: RaceSchedule, candidates: pd.DataFrame, picks: pd.DataFrame, now: datetime) -> str:
     pred_order = candidates["pred_order"].iloc[0] if "pred_order" in candidates.columns and not candidates.empty else ""
+    order_model = candidates.attrs.get("order_model", "position_softmax")
     winner_probs = candidates.attrs.get("winner_probs", {})
     winner_line = " / ".join(f"{boat}号艇 {prob:.1%}" for boat, prob in sorted(winner_probs.items()))
     upset_prob = float(candidates["upset_prob"].iloc[0]) if "upset_prob" in candidates.columns and not candidates.empty else 0.0
@@ -488,6 +516,7 @@ def render_prediction(race: RaceSchedule, candidates: pd.DataFrame, picks: pd.Da
         f"- 発走目安: {race.start_time}",
         f"- 荒れやすさ: {level_bar(level)} Lv.{level} {level_name} / 1号艇以外の1着 {upset_prob:.1%} / 万舟級 {high_prob:.1%}",
         f"- 予想順位: {pred_order}",
+        f"- 順位モデル: {order_model}",
         f"- 1着確率: {winner_line}",
         "",
         "展示航走:",
@@ -575,7 +604,8 @@ def predict_and_save_race(
         {
             "race": race.__dict__,
             "deadline": race.deadline,
-            "pred_order": candidates.attrs.get("pred_order", ""),
+        "pred_order": candidates.attrs.get("pred_order", ""),
+        "order_model": candidates.attrs.get("order_model", "position_softmax"),
             "winner_probs": candidates.attrs.get("winner_probs", {}),
             "upset_level": {
                 "level": level,

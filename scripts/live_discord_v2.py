@@ -84,6 +84,7 @@ def discord_time(target: datetime, style: str = "R") -> str:
 
 def prediction_payload(race: RaceSchedule, candidates, picks, now: datetime) -> dict[str, Any]:
     pred_order = candidates["pred_order"].iloc[0] if "pred_order" in candidates.columns and not candidates.empty else ""
+    order_model = candidates.attrs.get("order_model", "position_softmax")
     winner_probs = candidates.attrs.get("winner_probs", {})
     upset_prob = float(candidates["upset_prob"].iloc[0]) if not candidates.empty else 0.0
     high_prob = float(candidates["high10000_prob"].iloc[0]) if not candidates.empty else 0.0
@@ -118,6 +119,7 @@ def prediction_payload(race: RaceSchedule, candidates, picks, now: datetime) -> 
         f"発走目安: {race.start_time}\n"
         f"荒れやすさ: {level_bar(level)} Lv.{level} {level_name} / 1号艇以外の1着 {upset_prob:.1%} / 万舟級 {high_prob:.1%}\n"
         f"AI予想順位: {pred_order}\n"
+        f"順位モデル: {order_model}\n"
         f"1着確率: {prob_line}"
     )
     return {
@@ -148,6 +150,7 @@ def make_prediction_record(race: RaceSchedule, candidates, picks) -> dict[str, A
         "race": race.__dict__,
         "deadline": race.deadline,
         "pred_order": candidates.attrs.get("pred_order", ""),
+        "order_model": candidates.attrs.get("order_model", "position_softmax"),
         "winner_probs": candidates.attrs.get("winner_probs", {}),
         "upset_level": {
             "level": level,

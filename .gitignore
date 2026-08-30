@@ -9,5 +9,6 @@ work/*
 !work/.gitkeep
 worker_data/
 *.pkl
+!models/ranking_order_kibetsu/ranking_model_selected.pkl
 *.log
 notified_races.log
