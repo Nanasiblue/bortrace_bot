@@ -85,6 +85,36 @@ def discord_time(target: datetime, style: str = "R") -> str:
     return f"<t:{int(target.timestamp())}:{style}>"
 
 
+def pct(value: Any, digits: int = 1) -> str:
+    try:
+        return f"{float(value):.{digits}%}"
+    except Exception:
+        return "-"
+
+
+def signed(value: Any, digits: int = 2) -> str:
+    try:
+        return f"{float(value):+.{digits}f}"
+    except Exception:
+        return "-"
+
+
+def truncate_lines(lines: list[str], limit: int = 1024) -> str:
+    text = "\n".join(lines)
+    if len(text) <= limit:
+        return text
+    kept: list[str] = []
+    total = 0
+    for line in lines:
+        next_total = total + len(line) + (1 if kept else 0)
+        if next_total + 12 > limit:
+            break
+        kept.append(line)
+        total = next_total
+    kept.append("...省略")
+    return "\n".join(kept)
+
+
 def prediction_payload(race: RaceSchedule, candidates, picks, now: datetime) -> dict[str, Any]:
     pred_order = candidates["pred_order"].iloc[0] if "pred_order" in candidates.columns and not candidates.empty else ""
     order_model = candidates.attrs.get("order_model", "position_softmax")
@@ -95,52 +125,55 @@ def prediction_payload(race: RaceSchedule, candidates, picks, now: datetime) -> 
     level, level_name = upset_level(upset_prob, high_prob)
     source_row = candidates.attrs.get("source_row", {})
 
-    ex_lines = []
+    ex_lines = ["艇  展示   順  体重  ﾁﾙﾄ  ST展示"]
     for boat in range(1, 7):
         ex_lines.append(
-            f"{boat}号艇 展示 {fmt(source_row.get(f'ex_time_{boat}'))}"
-            f" / 順位 {source_row.get(f'ex_time_rank_low_{boat}', '-')}"
-            f" / 体重 {fmt(source_row.get(f'weight_{boat}'), 1)}"
-            f" / チルト {fmt(source_row.get(f'tilt_{boat}'), 1)}"
-            f" / ST {fmt(source_row.get(f'start_ex_st_by_course_{boat}'))}"
+            f"{boat}   {fmt(source_row.get(f'ex_time_{boat}')):>5}"
+            f"  {str(source_row.get(f'ex_time_rank_low_{boat}', '-')):>2}"
+            f"  {fmt(source_row.get(f'weight_{boat}'), 1):>4}"
+            f"  {fmt(source_row.get(f'tilt_{boat}'), 1):>4}"
+            f"  {fmt(source_row.get(f'start_ex_st_by_course_{boat}')):>5}"
         )
 
     if picks.empty:
-        pick_lines = ["見送り"]
+        pick_lines = ["見送り: 条件を満たす買い目なし"]
     else:
-        pick_lines = []
-        for _, row in picks.iterrows():
+        pick_lines = ["No  買い目   オッズ  AI確率  EV     Kelly  金額"]
+        for idx, (_, row) in enumerate(picks.iterrows(), start=1):
             stake = int(row.get("stake_yen", 0))
-            stake_text = f"購入候補 {stake:,}円" if stake > 0 else "参考候補（購入なし）"
+            stake_text = f"{stake:,}円" if stake > 0 else "見送り"
             pick_lines.append(
-                f"{row['combination']} / オッズ {row['odds']:.1f} / AI的中確率 {row['model_prob']:.3%} / 期待値 {row['model_ev']:.2f} "
-                f"/ Kelly {row['used_kelly']:.3%} / {stake_text}"
+                f"{idx:<2}  {row['combination']:<7} {row['odds']:>6.1f}  {pct(row['model_prob'], 2):>6}"
+                f"  {signed(row['model_ev']):>6}  {pct(row['used_kelly'], 2):>6}  {stake_text}"
             )
 
     prob_line = " / ".join(f"{boat}号艇 {prob:.1%}" for boat, prob in sorted(winner_probs.items()))
-    description = (
-        f"締切: {race.deadline}（{discord_time(race.deadline_dt)} / {discord_time(race.deadline_dt, 't')}）\n"
-        f"発走目安: {race.start_time}\n"
-        f"荒れやすさ: {level_bar(level)} Lv.{level} {level_name} / 1号艇以外の1着 {upset_prob:.1%} / 万舟級 {high_prob:.1%}\n"
+    summary = (
+        f"締切 {race.deadline} {discord_time(race.deadline_dt)} / 発走目安 {race.start_time}\n"
         f"AI予想順位: {pred_order}\n"
         f"順位モデル: {order_model}\n"
-        f"1着確率: {prob_line}"
+        f"荒れ判定: {level_bar(level)} Lv.{level} {level_name}"
     )
     fields = [
-        {"name": "読み筋", "value": "\n".join(explanation or ["説明材料なし"])[:1024], "inline": False},
-        {"name": "展示航走", "value": "\n".join(ex_lines)[:1024], "inline": False},
-        {"name": "買い目提案", "value": "\n".join(pick_lines)[:1024], "inline": False},
+        {
+            "name": "荒れ・確率",
+            "value": f"1号艇以外の1着: {pct(upset_prob)}\n万舟級: {pct(high_prob)}\n1着確率: {prob_line}",
+            "inline": False,
+        },
+        {"name": "展示航走", "value": f"```text\n{truncate_lines(ex_lines, 990)}\n```", "inline": False},
+        {"name": "AI推奨買い目", "value": f"```text\n{truncate_lines(pick_lines, 990)}\n```", "inline": False},
+        {"name": "読み筋", "value": truncate_lines(explanation or ["説明材料なし"]), "inline": False},
     ]
     return {
-        "content": f"競艇予想: {race.course} {race.rno}R / 締切 {race.deadline}",
+        "content": f"競艇予想 | {race.course} {race.rno}R | 締切 {race.deadline}",
         "embeds": [
             {
                 "title": f"{race.course} {race.rno}R 予測",
                 "url": race.url,
-                "description": description[:4000],
+                "description": summary[:4000],
                 "color": 0xE67E22 if level >= 4 else 0x3498DB,
                 "fields": fields,
-                "footer": {"text": f"race_id={race.race_id} / カウントダウンはDiscord側で自動更新"},
+                "footer": {"text": f"race_id={race.race_id} / Discordの相対時刻で残り時間を自動表示"},
                 "timestamp": datetime.now(JST).isoformat(),
             }
         ],
@@ -284,25 +317,39 @@ def result_payload(pred: dict[str, Any], result: dict[str, Any]) -> dict[str, An
     pick_lines = []
     if pred.get("picks"):
         pick_status = "的中" if hit_picks else "外れ"
-        for pick in pred["picks"][:5]:
+        pick_lines.append("買い目   結果  オッズ  AI確率  EV")
+        for pick in pred["picks"][:10]:
             mark = "的中 " if str(pick.get("combination")) == trifecta else ""
-            pick_lines.append(f"{mark}{pick.get('combination')} / オッズ {float(pick.get('odds', 0)):.1f}")
+            pick_lines.append(
+                f"{str(pick.get('combination')):<7} {mark or '-':<4} "
+                f"{float(pick.get('odds', 0)):>6.1f}  {pct(pick.get('model_prob'), 2):>6}  {signed(pick.get('model_ev')):>6}"
+            )
 
-    description = (
-        f"締切: {pred.get('deadline', race_data.get('deadline', ''))}\n"
-        f"実際の着順: {actual_order}\n"
-        f"3連単: {trifecta} / 払戻 {payout:,}円\n"
-        f"AI予想着順: {pred_order}\n"
-        f"順位判定: 1着 {'的中' if winner_hit else '外れ'} / 3連単順序 {'的中' if top3_exact else '外れ'}\n"
-        f"荒れやすさ: 予想Lv.{level.get('level')} {level.get('name')} / 実際 {'1号艇以外の1着' if actual_upset else '1号艇の1着'} "
-        f"/ {'一致' if pred_upset == actual_upset else '不一致'}\n"
-        f"買い目判定: {pick_status}"
-    )
-    fields = []
+    description = f"{course} {rno}R / 買い目判定: {pick_status}"
+    fields = [
+        {
+            "name": "結果",
+            "value": (
+                f"実際の着順: {actual_order}\n"
+                f"3連単: {trifecta}\n"
+                f"払戻: {payout:,}円"
+            ),
+            "inline": False,
+        },
+        {
+            "name": "予想との比較",
+            "value": (
+                f"AI予想着順: {pred_order}\n"
+                f"1着: {'的中' if winner_hit else '外れ'} / 3連単順序: {'的中' if top3_exact else '外れ'}\n"
+                f"荒れ判定: 予想Lv.{level.get('level')} {level.get('name')} / 実際 {'1号艇以外の1着' if actual_upset else '1号艇の1着'} / {'一致' if pred_upset == actual_upset else '不一致'}"
+            ),
+            "inline": False,
+        },
+    ]
     if pick_lines:
-        fields.append({"name": "買い目提案", "value": "\n".join(pick_lines)[:1024], "inline": False})
+        fields.append({"name": "買い目提案", "value": f"```text\n{truncate_lines(pick_lines, 990)}\n```", "inline": False})
     return {
-        "content": f"競艇成績: {course} {rno}R / {pick_status}",
+        "content": f"競艇成績 | {course} {rno}R | {pick_status}",
         "embeds": [
             {
                 "title": f"{course} {rno}R 結果",
