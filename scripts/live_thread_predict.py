@@ -348,6 +348,10 @@ def load_ranking_model(path: str = str(DEFAULT_RANKING_MODEL)) -> RaceRankingMod
     return model
 
 
+def candidate_model_is_calibrated(candidate_model: Any) -> bool:
+    return bool(getattr(candidate_model, "is_calibrated_probability_model", False))
+
+
 def build_live_row(race: RaceSchedule, race_dir: Path) -> pd.DataFrame:
     row: dict[str, Any] = {
         "date": int(race.date),
@@ -458,6 +462,17 @@ def score_candidates(
     model_x = candidates[CANDIDATE_FEATURE_COLUMNS].to_numpy(dtype=float)
     candidates["model_prob"] = candidate_model.predict_proba(model_x)[:, 1]
     candidates["model_ev"] = candidates["model_prob"] * candidates["odds"] - 1.0
+    if candidate_model_is_calibrated(candidate_model):
+        candidates["kelly_prob"] = candidates["model_prob"].clip(lower=0.0, upper=1.0)
+        candidates["full_kelly"] = [
+            kelly_fraction(float(prob), float(odds))
+            for prob, odds in zip(candidates["kelly_prob"], candidates["odds"])
+        ]
+        candidates["used_kelly"] = (candidates["full_kelly"] * kelly_scale).clip(lower=0.0, upper=max_kelly_fraction)
+        candidates["stake_yen"] = [
+            max(base_stake, int((bankroll * used) // 100 * 100)) if used > 0 else 0
+            for used in candidates["used_kelly"]
+        ]
     sorted_candidates = candidates.sort_values(["model_ev", "raw_ev"], ascending=[False, False]).reset_index(drop=True)
     sorted_candidates.attrs["pred_order"] = pred_order
     sorted_candidates.attrs["order_model"] = order_model
@@ -478,6 +493,7 @@ def pick_bets(
         (candidates["odds"] >= min_odds)
         & (candidates["odds"] <= max_odds)
         & (candidates["model_ev"] >= min_model_ev)
+        & (candidates["stake_yen"] > 0)
     ].copy()
     return picked.head(top_per_race)
 
@@ -542,15 +558,15 @@ def render_prediction(race: RaceSchedule, candidates: pd.DataFrame, picks: pd.Da
             stake = int(row["stake_yen"])
             stake_text = f"購入候補 {stake:,}円" if stake > 0 else "参考候補（購入なし）"
             lines.append(
-                f"- {row['combination']} / オッズ {row['odds']:.1f} / 期待値スコア {row['model_ev']:.2f} "
-                f"/ rawEV {row['raw_ev']:.2f} / Kelly {row['used_kelly']:.3%} / {stake_text}"
+                f"- {row['combination']} / オッズ {row['odds']:.1f} / AI的中確率 {row['model_prob']:.3%} "
+                f"/ 期待値 {row['model_ev']:.2f} / Kelly {row['used_kelly']:.3%} / {stake_text}"
             )
         lines.append("")
         lines.append("参考上位:")
     for _, row in candidates.head(5).iterrows():
         lines.append(
-            f"- {row['combination']} / オッズ {row['odds']:.1f} / 期待値スコア {row['model_ev']:.2f} / "
-            f"推定確率 {row['raw_prob']:.3%} / Kelly用確率 {row['kelly_prob']:.3%}"
+            f"- {row['combination']} / オッズ {row['odds']:.1f} / AI的中確率 {row['model_prob']:.3%} / "
+            f"期待値 {row['model_ev']:.2f} / Kelly {row['used_kelly']:.3%}"
         )
     return "\n".join(lines)
 
@@ -959,8 +975,8 @@ def main() -> None:
     parser.add_argument("--top-candidates", type=int, default=10)
     parser.add_argument("--top-per-race", type=int, default=3)
     parser.add_argument("--min-odds", type=float, default=50)
-    parser.add_argument("--max-odds", type=float, default=150)
-    parser.add_argument("--min-model-ev", type=float, default=84.24)
+    parser.add_argument("--max-odds", type=float, default=300)
+    parser.add_argument("--min-model-ev", type=float, default=0.1)
     parser.add_argument("--prob-scale", type=float, default=0.2)
     parser.add_argument("--kelly-scale", type=float, default=0.25)
     parser.add_argument("--max-kelly-fraction", type=float, default=0.003)

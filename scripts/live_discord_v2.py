@@ -109,7 +109,7 @@ def prediction_payload(race: RaceSchedule, candidates, picks, now: datetime) -> 
             stake = int(row.get("stake_yen", 0))
             stake_text = f"購入候補 {stake:,}円" if stake > 0 else "参考候補（購入なし）"
             pick_lines.append(
-                f"{row['combination']} / オッズ {row['odds']:.1f} / 期待値スコア {row['model_ev']:.2f} "
+                f"{row['combination']} / オッズ {row['odds']:.1f} / AI的中確率 {row['model_prob']:.3%} / 期待値 {row['model_ev']:.2f} "
                 f"/ Kelly {row['used_kelly']:.3%} / {stake_text}"
             )
 
@@ -281,9 +281,9 @@ def result_payload(pred: dict[str, Any], result: dict[str, Any]) -> dict[str, An
 
     description = (
         f"締切: {pred.get('deadline', race_data.get('deadline', ''))}\n"
-        f"結果: {actual_order}\n"
+        f"実際の着順: {actual_order}\n"
         f"3連単: {trifecta} / 払戻 {payout:,}円\n"
-        f"AI予想順位: {pred_order}\n"
+        f"AI予想着順: {pred_order}\n"
         f"順位判定: 1着 {'的中' if winner_hit else '外れ'} / 3連単順序 {'的中' if top3_exact else '外れ'}\n"
         f"荒れやすさ: 予想Lv.{level.get('level')} {level.get('name')} / 実際 {'1号艇以外の1着' if actual_upset else '1号艇の1着'} "
         f"/ {'一致' if pred_upset == actual_upset else '不一致'}\n"
@@ -443,8 +443,8 @@ def main() -> None:
     parser.add_argument("--top-candidates", type=int, default=10)
     parser.add_argument("--top-per-race", type=int, default=3)
     parser.add_argument("--min-odds", type=float, default=50)
-    parser.add_argument("--max-odds", type=float, default=150)
-    parser.add_argument("--min-model-ev", type=float, default=84.24)
+    parser.add_argument("--max-odds", type=float, default=300)
+    parser.add_argument("--min-model-ev", type=float, default=0.1)
     parser.add_argument("--prob-scale", type=float, default=0.2)
     parser.add_argument("--kelly-scale", type=float, default=0.25)
     parser.add_argument("--max-kelly-fraction", type=float, default=0.003)
