@@ -53,6 +53,7 @@ DEFAULT_CANDIDATE_MODEL = (
 )
 DEFAULT_RANKING_MODEL = PROJECT_ROOT / "models" / "ranking_order_kibetsu" / "ranking_model_selected.pkl"
 DEFAULT_KIBETSU_DIR = PROJECT_ROOT / "models" / "kibetsu"
+DEFAULT_UPSET_MODEL = PROJECT_ROOT / "models" / "upset_model" / "upset_model.pkl"
 COURSE_NAMES = {
     "01": "桐生",
     "02": "戸田",
@@ -348,6 +349,11 @@ def load_ranking_model(path: str = str(DEFAULT_RANKING_MODEL)) -> RaceRankingMod
     return model
 
 
+def load_pickle_model(path: Path) -> Any:
+    with path.open("rb") as f:
+        return pickle.load(f)
+
+
 def candidate_model_is_calibrated(candidate_model: Any) -> bool:
     return bool(getattr(candidate_model, "is_calibrated_probability_model", False))
 
@@ -386,6 +392,7 @@ def score_candidates(
     pos_models: dict[str, SoftmaxRegression],
     binary_models: dict[str, BinaryLogisticRegression],
     candidate_model: Any,
+    upset_model: Any | None = None,
     *,
     top_candidates: int,
     prob_scale: float,
@@ -413,6 +420,8 @@ def score_candidates(
         name: float(model.predict_proba(ensure_model_features(model_frame, model.feature_columns))[0])
         for name, model in binary_models.items()
     }
+    if upset_model is not None:
+        binary["upset"] = float(upset_model.predict_proba(model_frame)[0])
     odds_rows = parse_odds3t(race_dir / "odds3t.html")
     if not odds_rows:
         raise RuntimeError("三連単オッズが未取得")
@@ -587,6 +596,7 @@ def predict_and_save_race(
     pos_models: dict[str, SoftmaxRegression],
     binary_models: dict[str, BinaryLogisticRegression],
     candidate_model: Any,
+    upset_model: Any | None = None,
 ) -> str:
     race_dir = client.fetch_race_pages(race)
     row = build_live_row(race, race_dir)
@@ -597,6 +607,7 @@ def predict_and_save_race(
         pos_models,
         binary_models,
         candidate_model,
+        upset_model,
         top_candidates=args.top_candidates,
         prob_scale=args.prob_scale,
         kelly_scale=args.kelly_scale,
@@ -732,6 +743,8 @@ def run_once(args: argparse.Namespace) -> None:
 
     pos_models, binary_models = load_position_models(Path(args.official_models_dir))
     candidate_model = load_candidate_model(Path(args.candidate_model))
+    upset_model_path = Path(args.upset_model) if args.upset_model else None
+    upset_model = load_pickle_model(upset_model_path) if upset_model_path and upset_model_path.exists() else None
     targets = []
     for race in races:
         minutes_to_deadline = (race.deadline_dt - now).total_seconds() / 60.0
@@ -750,7 +763,9 @@ def run_once(args: argparse.Namespace) -> None:
     rendered = []
     for race in targets:
         try:
-            rendered.append(predict_and_save_race(args, date_str, now, client, race, pos_models, binary_models, candidate_model))
+            rendered.append(
+                predict_and_save_race(args, date_str, now, client, race, pos_models, binary_models, candidate_model, upset_model)
+            )
         except Exception as exc:
             rendered.append(f"## {race.course} {race.rno}R\n- skip: {exc}")
     print("\n\n".join(rendered))
@@ -912,6 +927,8 @@ def run_scheduled(args: argparse.Namespace) -> None:
 
     pos_models, binary_models = load_position_models(Path(args.official_models_dir))
     candidate_model = load_candidate_model(Path(args.candidate_model))
+    upset_model_path = Path(args.upset_model) if args.upset_model else None
+    upset_model = load_pickle_model(upset_model_path) if upset_model_path and upset_model_path.exists() else None
     events: list[tuple[datetime, str, RaceSchedule]] = []
     for race in races:
         events.append((race.deadline_dt - timedelta(minutes=args.predict_before_deadline_min), "predict", race))
@@ -933,7 +950,12 @@ def run_scheduled(args: argparse.Namespace) -> None:
         if kind == "predict":
             print(f"\n# 予測取得 {race.course} {race.rno}R / 締切 {race.deadline}", flush=True)
             try:
-                print(predict_and_save_race(args, date_str, datetime.now(JST), client, race, pos_models, binary_models, candidate_model), flush=True)
+                print(
+                    predict_and_save_race(
+                        args, date_str, datetime.now(JST), client, race, pos_models, binary_models, candidate_model, upset_model
+                    ),
+                    flush=True,
+                )
             except Exception as exc:
                 print(f"## {race.course} {race.rno}R\n- skip: {exc}", flush=True)
         else:
@@ -972,6 +994,7 @@ def main() -> None:
         "--candidate-model",
         default=str(DEFAULT_CANDIDATE_MODEL),
     )
+    parser.add_argument("--upset-model", default=str(DEFAULT_UPSET_MODEL))
     parser.add_argument("--top-candidates", type=int, default=10)
     parser.add_argument("--top-per-race", type=int, default=5)
     parser.add_argument("--min-odds", type=float, default=50)
